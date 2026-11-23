@@ -10,6 +10,7 @@ config.yaml
 *.db-wal
 *.db-shm
 .pytest_cache/
+*.egg-info/
 *.rar
 *.zip
 *.7z
