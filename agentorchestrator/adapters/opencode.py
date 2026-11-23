@@ -113,6 +113,42 @@ class OpenCodeAdapter(AgentAdapter):
                                 metadata={"path": path, "raw": payload})
         raise AdapterError(f"OpenCode 健康检查失败：{last_error}")
 
+    async def list_models(self) -> dict[str, Any]:
+        """返回已配置/可用的 provider/model 列表（绝不包含 API key）。"""
+        response = await self._request("GET", "/config/providers", timeout=20)
+        payload = response.json()
+        providers = payload.get("providers") or []
+        items: list[dict[str, Any]] = []
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            provider_id = provider.get("id")
+            if not provider_id:
+                continue
+            models = provider.get("models") or {}
+            if not isinstance(models, dict) or not models:
+                continue
+            configured = bool(provider.get("key"))
+            if not configured:
+                env_names = provider.get("env") or []
+                configured = any(os.environ.get(str(name)) for name in env_names)
+            for model_id, model in models.items():
+                items.append({
+                    "provider_id": provider_id,
+                    "provider_name": provider.get("name") or provider_id,
+                    "model_id": model_id,
+                    "model_name": (model or {}).get("name") or model_id,
+                    "configured": configured,
+                })
+        items.sort(key=lambda item: (not item["configured"], item["provider_id"], item["model_id"]))
+        return {
+            "models": items,
+            "current": {
+                "provider_id": self.settings.provider_id,
+                "model_id": self.settings.model_id,
+            },
+        }
+
     async def create_session(self, run_id: str, config: dict[str, Any] | None = None) -> str:
         options = config or {}
         model = None

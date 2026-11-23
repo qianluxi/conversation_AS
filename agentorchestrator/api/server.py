@@ -28,6 +28,7 @@ class StartRunRequest(BaseModel):
     reviewer: str | None = None
     max_rounds: int = Field(default=2, ge=1, le=10)
     timeout: float | None = Field(default=None, gt=0)
+    opencode_model: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -59,17 +60,36 @@ def _json(model: Any) -> Any:
     return model.model_dump(mode="json")
 
 
+def _apply_opencode_model(adapters: dict[str, Any], spec: str | None) -> None:
+    if not spec or "/" not in spec:
+        return
+    provider_id, model_id = spec.split("/", 1)
+    if not provider_id or not model_id:
+        return
+    for adapter in adapters.values():
+        if getattr(adapter, "kind", "") == "opencode":
+            adapter.settings = adapter.settings.model_copy(update={
+                "provider_id": provider_id,
+                "model_id": model_id,
+            })
+
+
 def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[str, Any]:
     run = store.get_run(run_id)
     if run is None:
         raise KeyError(run_id)
+    messages = store.list_messages(run_id)
+    last_error = next((message.error for message in reversed(messages) if message.error), None)
+    if not last_error:
+        last_error = run.metadata.get("error") or run.metadata.get("reason")
     return {
         "run": _json(run),
         "steps": [_json(step) for step in store.list_steps(run_id)],
-        "messages": [_json(message) for message in store.list_messages(run_id)],
+        "messages": [_json(message) for message in messages],
         "events": [_json(event) for event in store.list_events(run_id, limit=150)],
         "active": _is_active(handle),
         "error": handle.error if handle else None,
+        "last_error": last_error,
         "result": handle.result if handle else None,
     }
 
@@ -117,6 +137,31 @@ def create_app(config: AppConfig, store: Store) -> FastAPI:
                     pass
         return results
 
+    @app.get("/api/opencode/models")
+    async def opencode_models(request: Request, agent: str | None = None) -> dict[str, Any]:
+        cfg: AppConfig = request.app.state.config
+        adapters = build_adapters(cfg)
+        try:
+            candidates = [
+                (name, adapter) for name, adapter in adapters.items()
+                if getattr(adapter, "kind", "") == "opencode"
+                and (agent is None or name == agent)
+            ]
+            if not candidates:
+                raise HTTPException(400, "配置中没有可用的 opencode agent")
+            name, adapter = candidates[0]
+            try:
+                data = await adapter.list_models()
+            except AdapterError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return {"agent": name, **data}
+        finally:
+            for adapter in adapters.values():
+                try:
+                    await adapter.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+
     # ---- runs -------------------------------------------------------------
 
     @app.get("/api/runs")
@@ -135,6 +180,7 @@ def create_app(config: AppConfig, store: Store) -> FastAPI:
             raise HTTPException(400, f"未配置 agent: {', '.join(missing)}")
 
         adapters = build_adapters(cfg)
+        _apply_opencode_model(adapters, payload.opencode_model)
         try:
             conversation = Conversation(store, adapters, goal=payload.goal)
         except Exception:

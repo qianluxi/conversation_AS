@@ -48,8 +48,9 @@ python -m agentorchestrator ui
 默认自动打开 `http://127.0.0.1:8765/`，包含：
 
 - 一键检查各 agent 连接状态；
-- 填写目标任务，选择 Planner / Worker / Reviewer，点击「开始协作」；
-- 实时查看运行状态、步骤耗时、消息全文、状态机事件；
+- 填写目标任务，选择 Planner / Worker / Reviewer 与 **OpenCode 模型**；
+  默认优先选择已配置的 `opencode-go` 模型，避免默认模型鉴权失败；
+- 点击「开始协作」后实时查看运行状态、步骤耗时、消息全文、状态机事件；
 - 结构化审查结果（结论、findings、evidence、confidence）；
 - 待处理/隔离消息的「核对恢复」与「强制释放」；
 - 历史运行列表，点击回看。

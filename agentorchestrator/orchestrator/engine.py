@@ -480,9 +480,14 @@ async def run_collaboration(conversation: Conversation, *,
         conversation.set_phase(RunPhase.ANALYZING)
         plan_reply = await conversation.ask(
             planner,
-            "你是需求分析与方案设计者。请针对下面的协作任务形成结构化任务方案。\n"
+            "你是需求分析与方案设计者。请针对下面的协作任务形成可执行的任务方案。\n"
             f"任务：{goal}\n"
-            "输出：目标、检查项、期望输出字段、约束。只做方案，不要修改代码。",
+            "要求：\n"
+            "- 不要向用户提问，不要要求确认，直接给出最终可执行方案；\n"
+            "- 如果任务很简单（例如只输出一行文本），方案必须保持极简，"
+            "不要扩展交付物、检查清单或额外字段；\n"
+            "- 只做方案，不要修改代码。\n"
+            "输出：目标、检查项、期望结果、约束。",
             turn_id=0, timeout=timeout, dedupe_key=f"{conversation.run_id}:0:{planner}",
             role="planner", phase=RunPhase.ANALYZING,
         )
@@ -512,6 +517,8 @@ async def run_collaboration(conversation: Conversation, *,
             review_reply = await conversation.ask(
                 reviewer,
                 "你是审查者。请结合任务方案与执行结果进行审查。\n"
+                "只检查执行结果是否满足既定方案，不要提出方案之外的新要求；"
+                "若满足方案且证据充分，应判定 approved。\n"
                 f"【任务方案】\n{plan}\n"
                 f"【执行结果】\n{work_reply.text}\n\n"
                 f"{REVIEW_CONTRACT}",

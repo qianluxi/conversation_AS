@@ -232,7 +232,8 @@ python -m agentorchestrator --config config.yaml ui
 默认自动打开 `http://127.0.0.1:8765/`。界面内可以：
 
 - 检查 agent 连接；
-- 填写任务目标，选择 Planner / Worker / Reviewer、最大轮数与超时并启动协作；
+- 填写任务目标，选择 Planner / Worker / Reviewer、**OpenCode 模型**、最大轮数与
+  超时并启动协作；模型下拉默认优先选择已配置的 `opencode-go` 模型；
 - 实时查看运行状态、步骤耗时、消息全文、状态机事件和结构化审查结果；
 - 在「待处理 / 隔离消息」中执行核对恢复或强制释放；
 - 从历史运行列表点击回看。
@@ -311,8 +312,12 @@ python -m agentorchestrator --config config.yaml run --goal "审查特征工程�
 
 ### 8.1 401 / 鉴权失败
 
-- OpenCode：确认 `$env:OPENCODE_SERVER_PASSWORD` 与 `config.yaml` 的 `password`
-  一致，用户名固定 `opencode`。
+- OpenCode：
+  - 确认 `$env:OPENCODE_SERVER_PASSWORD` 与 `config.yaml` 的 `password` 一致，
+    用户名固定 `opencode`；
+  - 若报 `invalid api key`（例如默认 DeepSeek key 失效），在界面「OpenCode 模型」
+    中改选已配置的模型（推荐 `opencode-go/deepseek-v4.1-flash`），或在配置中设置
+    `provider_id` / `model_id`。
 - WorkBuddy：`auth status` 检查；必要时 `auth url` + `auth exchange` 重新授权。
 
 ### 8.2 等待超时 / 结果未知（`unknown`）

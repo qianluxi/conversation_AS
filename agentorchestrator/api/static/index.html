@@ -131,6 +131,13 @@
         <div><label>Worker</label><select id="worker"></select></div>
         <div><label>Reviewer</label><select id="reviewer"></select></div>
       </div>
+      <div class="row" style="grid-template-columns: 1fr">
+        <div>
+          <label>OpenCode 模型</label>
+          <select id="opencodeModel"></select>
+          <div id="modelHint" class="muted" style="margin-top:6px"></div>
+        </div>
+      </div>
       <div class="row-2">
         <div><label>最大轮数</label><input id="maxRounds" type="number" value="2" min="1" max="10"></div>
         <div><label>超时（秒）</label><input id="timeout" type="number" value="300" min="10"></div>
@@ -158,6 +165,7 @@
         <h2 style="margin:0">运行详情</h2>
         <div id="runMeta" class="muted">尚未运行</div>
       </div>
+      <div id="runError"></div>
       <div id="review"></div>
       <div class="tabs">
         <button class="tab active" data-tab="steps">步骤</button>
@@ -228,6 +236,41 @@ async function loadAgents() {
   else if (names.length > 1) $("worker").value = names[1];
 }
 
+async function loadModels() {
+  const select = $("opencodeModel");
+  const hint = $("modelHint");
+  try {
+    const data = await api("/api/opencode/models");
+    const models = data.models || [];
+    const configured = models.filter(item => item.configured);
+    const list = configured.length ? configured : models;
+    if (!list.length) {
+      select.innerHTML = `<option value="">使用配置默认</option>`;
+      hint.textContent = "未发现可用模型，将使用 OpenCode 默认模型。";
+      return;
+    }
+    select.innerHTML = `<option value="">使用配置默认</option>` + list.map(item => {
+      const label = `${item.provider_name} / ${item.model_name}${item.configured ? "" : "（未配置）"}`;
+      return `<option value="${esc(item.provider_id)}/${esc(item.model_id)}">${esc(label)}</option>`;
+    }).join("");
+    const current = data.current || {};
+    let target = current.provider_id && current.model_id
+      ? `${current.provider_id}/${current.model_id}` : "";
+    if (!target || ![...select.options].some(option => option.value === target)) {
+      const preferred = list.find(item => item.configured
+          && item.provider_id === "opencode-go" && item.model_id === "deepseek-v4.1-flash")
+        || list.find(item => item.configured && item.provider_id === "opencode-go")
+        || list.find(item => item.configured) || list[0];
+      target = `${preferred.provider_id}/${preferred.model_id}`;
+    }
+    if ([...select.options].some(option => option.value === target)) select.value = target;
+    hint.textContent = "若默认模型报鉴权错误，请改选其他已配置的模型。";
+  } catch (error) {
+    select.innerHTML = `<option value="">使用配置默认</option>`;
+    hint.textContent = `无法读取模型列表：${error.message}`;
+  }
+}
+
 async function checkHealth() {
   const button = $("healthBtn");
   button.disabled = true;
@@ -262,6 +305,7 @@ async function startRun() {
       planner: $("planner").value,
       worker: $("worker").value,
       reviewer: $("reviewer").value || null,
+      opencode_model: $("opencodeModel").value || null,
       max_rounds: Number($("maxRounds").value) || 2,
       timeout: Number($("timeout").value) || 300,
     };
@@ -322,10 +366,26 @@ function renderRun(data) {
     $("runMeta").innerHTML += `<div class="muted" style="margin-top:6px;max-width:700px">${esc(run.goal)}</div>`;
   }
   renderReview(run, data);
+  renderError(data);
   renderSteps(data.steps || []);
   renderMessages(data.messages || []);
   renderEvents(data.events || []);
   if (data.error) setError(data.error);
+}
+
+function renderError(data) {
+  const box = $("runError");
+  const error = data.last_error;
+  if (!error) { box.innerHTML = ""; return; }
+  const auth = /Authentication Fails|api key|invalid_api_key|401/i.test(error);
+  const hint = auth
+    ? `<div class="muted" style="margin-top:8px">提示：请在上方「OpenCode 模型」中选择已配置的模型（优先使用 opencode-go），然后重新开始。</div>`
+    : "";
+  box.innerHTML = `<div class="review failed">
+    <h3>运行失败</h3>
+    <div style="word-break:break-word">${esc(error)}</div>
+    ${hint}
+  </div>`;
 }
 
 function renderReview(run, data) {
@@ -372,6 +432,7 @@ function renderMessages(messages) {
         · ${esc(message.from_agent)} → ${esc(message.to_agent)}
         <span class="muted">${fmtTime(message.created_at)}</span>
       </summary>
+      ${message.error ? `<div class="error" style="padding:8px 12px 0">${esc(message.error)}</div>` : ""}
       <pre>${esc(message.content)}</pre>
     </details>`).join("");
 }
@@ -465,6 +526,7 @@ async function boot() {
   $("healthBtn").addEventListener("click", checkHealth);
   try {
     await loadAgents();
+    await loadModels();
     loadHistory();
     loadPending();
     checkHealth();

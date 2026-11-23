@@ -33,6 +33,8 @@ def test_ui_page_and_mock_run(tmp_path: Path) -> None:
 
             agents = client.get("/api/agents").json()
             assert {item["name"] for item in agents} == {"planner", "worker"}
+            # 没有 opencode agent 时，模型列表接口应返回 400，而不是 500
+            assert client.get("/api/opencode/models").status_code == 400
 
             health = client.get("/api/health").json()
             assert all(item["ok"] for item in health)

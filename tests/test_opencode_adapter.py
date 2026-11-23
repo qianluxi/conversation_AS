@@ -126,3 +126,29 @@ def test_v2_flow() -> None:
             await adapter.cancel(session_id)
 
     run(scenario())
+
+def test_list_models_never_leaks_provider_keys() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/config/providers":
+            return httpx.Response(200, json={"providers": [
+                {"id": "p1", "name": "Provider One", "key": "SECRET-KEY",
+                 "models": {"m1": {"name": "Model One"}}},
+                {"id": "p2", "name": "Provider Two", "env": ["MISSING_ENV"],
+                 "models": {"m2": {"name": "Model Two"}}},
+            ]})
+        return httpx.Response(404, json={"error": request.url.path})
+
+    async def scenario() -> dict:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter("oc", _settings(), client=client)
+            return await adapter.list_models()
+
+    data = run(scenario())
+    text = json.dumps(data, ensure_ascii=False)
+    assert "SECRET-KEY" not in text
+    assert "key" not in {entry for item in data["models"] for entry in item}
+    assert data["models"][0]["provider_id"] == "p1"
+    assert data["models"][0]["configured"] is True
+    assert data["models"][0]["model_name"] == "Model One"
+    assert data["models"][1]["configured"] is False
