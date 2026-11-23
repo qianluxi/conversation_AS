@@ -354,15 +354,7 @@ class WorkBuddyAcpAdapter(AgentAdapter):
         params = message.get("params") or {}
         try:
             if method == "session/request_permission":
-                if self.permission_handler is not None:
-                    result = await self.permission_handler(message)
-                elif self.settings.auto_approve:
-                    options = params.get("options") or []
-                    allowed = [opt for opt in options if opt.get("kind") in ("allow_once", "allow_always")]
-                    picked = (allowed or options or [{}])[0]
-                    result = {"outcome": {"outcome": "selected", "optionId": picked.get("optionId")}}
-                else:
-                    result = {"outcome": {"outcome": "cancelled"}}
+                result = await self._resolve_permission(message, params)
             else:
                 await self._post_acp(
                     {"jsonrpc": "2.0", "id": message["id"],
@@ -376,6 +368,37 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             )
         except Exception as exc:  # noqa: BLE001 - 不让 UI 请求拖垮读流
             log.warning("处理 ACP 服务端请求失败：%s", exc)
+
+    def _permission_tool_name(self, params: dict[str, Any]) -> str:
+        tool = params.get("toolCall") or params.get("tool_call") or {}
+        parts = [
+            params.get("title"), params.get("toolName"),
+            tool.get("title"), tool.get("name"), tool.get("kind"), tool.get("toolName"),
+        ]
+        return " ".join(str(part) for part in parts if part)
+
+    @staticmethod
+    def _select_option(options: list[dict[str, Any]]) -> dict[str, Any]:
+        allowed = [opt for opt in options if opt.get("kind") in ("allow_once", "allow_always")]
+        picked = (allowed or options or [{}])[0]
+        return {"outcome": {"outcome": "selected", "optionId": picked.get("optionId")}}
+
+    async def _resolve_permission(self, message: dict[str, Any],
+                                  params: dict[str, Any]) -> dict[str, Any]:
+        options = params.get("options") or []
+        tool = self._permission_tool_name(params)
+        category = self.settings.permissions.category(tool)
+        log.info("ACP 工具授权：%s -> %s", (tool or "unknown")[:80], category)
+
+        if category == "deny":
+            return {"outcome": {"outcome": "cancelled"}}
+        if category == "allow":
+            return self._select_option(options)
+        if self.permission_handler is not None:
+            return await self.permission_handler(message)
+        if self.settings.auto_approve:
+            return self._select_option(options)
+        return {"outcome": {"outcome": "cancelled"}}
 
     def _fail_all(self, error: Exception) -> None:
         for future in list(self._pending_rpc.values()):

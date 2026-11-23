@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from ..config import (
     AgentSettings,
     AppConfig,
@@ -41,11 +43,13 @@ __all__ = [
 ]
 
 
-def build_adapter(name: str, settings: AgentSettings) -> AgentAdapter:
+def build_adapter(name: str, settings: AgentSettings,
+                  *,
+                  local_lock: asyncio.Lock | None = None) -> AgentAdapter:
     if isinstance(settings, OpencodeSettings):
         return OpenCodeAdapter(name, settings)
     if isinstance(settings, WorkBuddyLocalSettings):
-        return WorkBuddyLocalAdapter(name, settings)
+        return WorkBuddyLocalAdapter(name, settings, lock=local_lock)
     if isinstance(settings, WorkBuddyAcpSettings):
         return WorkBuddyAcpAdapter(name, settings)
     if isinstance(settings, MockSettings):
@@ -54,4 +58,12 @@ def build_adapter(name: str, settings: AgentSettings) -> AgentAdapter:
 
 
 def build_adapters(config: AppConfig) -> dict[str, AgentAdapter]:
-    return {name: build_adapter(name, settings) for name, settings in config.agents.items()}
+    # 同一 PC 本地助理（相同 base_url）的所有实例共享一把锁，避免跨任务串扰。
+    local_locks: dict[str, asyncio.Lock] = {}
+    adapters: dict[str, AgentAdapter] = {}
+    for name, settings in config.agents.items():
+        lock = None
+        if isinstance(settings, WorkBuddyLocalSettings):
+            lock = local_locks.setdefault(settings.base_url, asyncio.Lock())
+        adapters[name] = build_adapter(name, settings, local_lock=lock)
+    return adapters

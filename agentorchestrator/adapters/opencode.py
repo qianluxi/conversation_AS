@@ -207,7 +207,10 @@ class OpenCodeAdapter(AgentAdapter):
             session_id=session_id, message_id=message_id,
             baseline_assistant_ids=baseline, sent_at=time.time(), api_style="v2",
         )
-        return MessageRef(session_id=session_id, message_id=message_id)
+        return MessageRef(
+            session_id=session_id, message_id=message_id,
+            metadata={"api_style": "v2", "baseline_assistant_ids": sorted(baseline)},
+        )
 
     async def wait_response(self, ref: MessageRef, *, timeout: float | None = None) -> AgentReply:
         cached = self._replies.pop(ref.message_id, None)
@@ -363,6 +366,48 @@ class OpenCodeAdapter(AgentAdapter):
         return reply, text
 
     # ---- control ----------------------------------------------------------
+
+    async def recover_reply(self, session_id: str, ref: MessageRef) -> AgentReply | None:
+        """重启后查询 OpenCode 会话，确认消息是否已经产生完整回复。"""
+        if self.settings.api_style == "v2" or ref.metadata.get("api_style") == "v2":
+            baseline = set(ref.metadata.get("baseline_assistant_ids") or [])
+            items = await self._v2_messages(session_id, order="desc", limit=100)
+            candidates = [
+                item for item in items
+                if item.get("type") == "assistant" and item.get("id") not in baseline
+            ]
+            if not candidates:
+                return None
+            chosen = max(candidates, key=lambda item: float((item.get("time") or {}).get("created") or 0))
+            finished = bool((chosen.get("time") or {}).get("completed")) or bool(chosen.get("finish"))
+            if not finished:
+                return None
+            text = "\n".join(
+                part.get("text", "") for part in chosen.get("content") or []
+                if part.get("type") == "text"
+            ).strip()
+            return AgentReply(session_id=session_id, text=text,
+                              provider_message_id=chosen.get("id"),
+                              stop_reason=chosen.get("finish") or "end_turn",
+                              usage=chosen.get("tokens") or {},
+                              metadata={"mode": "recovered", "api_style": "v2"})
+
+        items = await self._legacy_messages(session_id)
+        for item in items:
+            info = item.get("info") or {}
+            if info.get("role") != "assistant" or info.get("parentID") != ref.message_id:
+                continue
+            if not (info.get("time") or {}).get("completed"):
+                return None
+            return AgentReply(
+                session_id=session_id,
+                text=self._extract_legacy_parts(item.get("parts") or []),
+                provider_message_id=info.get("id"),
+                stop_reason="end_turn",
+                usage=info.get("tokens") or {},
+                metadata={"mode": "recovered", "api_style": "legacy"},
+            )
+        return None
 
     async def cancel(self, session_id: str) -> None:
         path = (f"/api/session/{session_id}/interrupt"

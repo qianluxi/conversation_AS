@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agentorchestrator.adapters.opencode import OpenCodeAdapter
 from agentorchestrator.adapters.workbuddy_local import WorkBuddyLocalAdapter
 from agentorchestrator.config import OpencodeSettings, WorkBuddyLocalSettings
-from agentorchestrator.messaging.schema import RunStatus
+from agentorchestrator.messaging.schema import RunPhase, RunStatus, StepState
 from agentorchestrator.orchestrator.engine import Conversation, run_collaboration
 from agentorchestrator.storage.database import Store
 
@@ -51,14 +52,20 @@ def test_workbuddy_opencode_bidirectional(tmp_path: Path) -> None:
         opencode_messages = [m for m in messages if m.from_agent == "opencode"]
         assert len(workbuddy_messages) == 2
         assert len(opencode_messages) == 1
-        assert any("APPROVED" in message.content for message in workbuddy_messages)
+        reviews = [json.loads(m.content) for m in workbuddy_messages
+                   if m.content.lstrip().startswith("{")]
+        assert reviews and reviews[0]["decision"] == "approved"
         assert "OPENCODE 执行结果" in opencode_messages[0].content
 
         assert all(message.status.value == "completed" for message in messages)
         stored_run = store.get_run(conversation.run_id)
         assert stored_run is not None
         assert stored_run.status is RunStatus.COMPLETED
+        assert stored_run.phase is RunPhase.APPROVED
         assert stored_run.metadata["approved"] is True
+        assert store.list_events(conversation.run_id)
+        steps = store.list_steps(conversation.run_id)
+        assert steps and all(step.state is StepState.COMPLETED for step in steps)
         store.close()
 
 

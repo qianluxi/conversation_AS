@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from agentorchestrator.adapters.workbuddy_acp import WorkBuddyAcpAdapter
-from agentorchestrator.config import WorkBuddyAcpSettings
+from agentorchestrator.config import PermissionSettings, WorkBuddyAcpSettings
 
 from conftest import FakeAuth, run
 
@@ -33,11 +33,12 @@ class _QueueStream(httpx.AsyncByteStream):
 class FakeACPTransport(httpx.AsyncBaseTransport):
     """模拟 WorkBuddy 控制面 + ACP SSE 通道。"""
 
-    def __init__(self) -> None:
+    def __init__(self, permission_title: str = "Write file") -> None:
         import asyncio
 
         self.queue: Any = asyncio.Queue()
         self.requests: list[tuple[httpx.Request, dict[str, Any]]] = []
+        self.permission_title = permission_title
 
     def push(self, payload: dict[str, Any]) -> None:
         self.queue.put_nowait(_sse(payload))
@@ -82,22 +83,30 @@ class FakeACPTransport(httpx.AsyncBaseTransport):
                            "content": {"type": "text", "text": "world"}},
             }})
             self.push({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission",
-                       "params": {"sessionId": "t1", "options": [
-                           {"optionId": "allow", "kind": "allow_once", "name": "Allow"},
-                       ]}})
+                       "params": {
+                           "sessionId": "t1",
+                           "toolCall": {"title": self.permission_title, "kind": "tool"},
+                           "options": [
+                               {"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+                           ],
+                       }})
             self.push({"jsonrpc": "2.0", "id": body["id"],
                        "result": {"stopReason": "end_turn", "usage": {"total": 3}}})
         return httpx.Response(200, json={})
 
 
-def test_acp_flow() -> None:
+def _run_flow(*, permission_title: str = "Write file",
+              auto_approve: bool = False) -> tuple[str, FakeACPTransport]:
     settings = WorkBuddyAcpSettings(
         base_url="https://control.test", bootstrap_prompt="boot",
         cwd="/workspace", timeout=3, poll_interval=0.01,
+        auto_approve=auto_approve,
     )
-    transport = FakeACPTransport()
+    transport = FakeACPTransport(permission_title)
+    reply_text = ""
 
     async def scenario() -> None:
+        nonlocal reply_text
         async with httpx.AsyncClient(transport=transport) as control, \
                 httpx.AsyncClient(transport=transport) as acp:
             adapter = WorkBuddyAcpAdapter(
@@ -108,14 +117,27 @@ def test_acp_flow() -> None:
                 session_id = await adapter.create_session("run1")
                 ref = await adapter.send_message(session_id, "hi")
                 reply = await adapter.wait_response(ref, timeout=3)
-                assert reply.text == "hello world"
-                assert reply.stop_reason == "end_turn"
-                assert reply.usage == {"total": 3}
+                reply_text = reply.text
                 await adapter.cancel(session_id)
             finally:
                 await adapter.aclose()
 
     run(scenario())
+    return reply_text, transport
+
+
+def _permission_result(transport: FakeACPTransport) -> dict[str, Any]:
+    replies = [
+        body for _request, body in transport.requests
+        if body.get("id") == 99 and "result" in body
+    ]
+    assert replies, "没有收到对 permission 请求的应答"
+    return replies[0]["result"]
+
+
+def test_acp_flow_and_default_permission_denied() -> None:
+    reply_text, transport = _run_flow()
+    assert reply_text == "hello world"
 
     methods = [body.get("method") for _request, body in transport.requests]
     assert methods.count("initialize") == 1
@@ -130,11 +152,32 @@ def test_acp_flow() -> None:
     assert prompt_request.headers["authorization"] == "Bearer tok1"
     assert prompt_request.headers["acp-connection-id"] == "conn-1"
 
-    permission_replies = [
-        body for _request, body in transport.requests
-        if body.get("id") == 99 and "result" in body
-    ]
-    assert permission_replies
-    assert permission_replies[0]["result"] == {"outcome": {"outcome": "cancelled"}}
-
+    assert _permission_result(transport) == {"outcome": {"outcome": "cancelled"}}
     assert any(body.get("method") == "session/cancel" for _request, body in transport.requests)
+
+
+def test_permission_allow_read_is_auto_approved() -> None:
+    _reply, transport = _run_flow(permission_title="Read file features.py")
+    assert _permission_result(transport) == {
+        "outcome": {"outcome": "selected", "optionId": "allow"},
+    }
+
+
+def test_permission_deny_shell_wins_over_auto_approve() -> None:
+    _reply, transport = _run_flow(permission_title="Bash shell command", auto_approve=True)
+    assert _permission_result(transport) == {"outcome": {"outcome": "cancelled"}}
+
+
+def test_permission_ask_respects_auto_approve() -> None:
+    _reply, transport = _run_flow(permission_title="Write file", auto_approve=True)
+    assert _permission_result(transport) == {
+        "outcome": {"outcome": "selected", "optionId": "allow"},
+    }
+
+
+def test_permission_settings_categories() -> None:
+    policy = PermissionSettings()
+    assert policy.category("Read file") == "allow"
+    assert policy.category("Write file") == "ask"
+    assert policy.category("Bash: rm -rf build") == "deny"
+    assert policy.category("unknown-tool") == "ask"

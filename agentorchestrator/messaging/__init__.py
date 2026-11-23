@@ -1,3 +1,25 @@
-from ..messaging.schema import Message, MessageStatus, Run, RunStatus, SessionBinding
+from __future__ import annotations
 
-__all__ = ["Message", "MessageStatus", "Run", "RunStatus", "SessionBinding"]
+from ..messaging.schema import (
+    Message,
+    MessageStatus,
+    Run,
+    RunEvent,
+    RunPhase,
+    RunStatus,
+    SessionBinding,
+    Step,
+    StepState,
+)
+
+__all__ = [
+    "Message",
+    "MessageStatus",
+    "Run",
+    "RunEvent",
+    "RunPhase",
+    "RunStatus",
+    "SessionBinding",
+    "Step",
+    "StepState",
+]

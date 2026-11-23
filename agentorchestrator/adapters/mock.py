@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -32,9 +33,21 @@ class MockAdapter(AgentAdapter):
         if self.role in ("planner", "reviewer"):
             if "你是审查者" in text or "【执行结果】" in text:
                 result = text.split("【执行结果】")[-1]
-                if "APPROVED" in result.upper() or "执行完成" in result:
-                    return "APPROVED：结果完整、合理，满足要求。"
-                return "问题：缺少异常值处理说明，请补充后重试。"
+                approved = "APPROVED" in result.upper() or "执行完成" in result
+                payload = {
+                    "decision": "approved" if approved else "revision_required",
+                    "summary": "mock 审查完成",
+                    "findings": [] if approved else [{
+                        "severity": "medium",
+                        "file": None,
+                        "location": None,
+                        "problem": "mock：需要补充说明",
+                        "suggested_action": "补充异常值处理说明",
+                    }],
+                    "evidence": ["mock-review"],
+                    "confidence": 0.9,
+                }
+                return json.dumps(payload, ensure_ascii=False)
             return (
                 "分析完成，形成任务方案：\n"
                 f"- 目标：{text.strip()[:200]}\n"

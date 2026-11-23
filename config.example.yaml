@@ -31,6 +31,11 @@ agents:
   #   timeout: 600
   #   poll_interval: 2
   #   auto_approve: false
+  #   # 工具授权策略：按工具名/标题中的关键词分类，deny 永远优先于 auto_approve
+  #   permissions:
+  #     allow: [read, list, search, grep, analyze]
+  #     ask: [write, edit, test, network, http, fetch]
+  #     deny: [install, uninstall, delete, remove, shell, bash, terminal, exec, sudo, format]
 
   opencode:
     type: opencode

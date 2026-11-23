@@ -112,7 +112,13 @@ class FakeWorkBuddyHandler(_QuietHandler):
         message_id = f"wb-{state['n']}"
         state["inputs"][message_id] = content
         if "审查" in content and ("OPENCODE" in content or "执行结果" in content):
-            state["replies"][message_id] = "APPROVED：审查通过。"
+            state["replies"][message_id] = json.dumps({
+                "decision": "approved",
+                "summary": "结构完整，可以结束",
+                "findings": [],
+                "evidence": ["fake-workbuddy-review"],
+                "confidence": 0.95,
+            }, ensure_ascii=False)
         else:
             state["replies"][message_id] = f"WORKBUDDY 分析：{content[:80]}"
         self._json(200, {"code": 0, "msg": "success", "request_id": "r2",

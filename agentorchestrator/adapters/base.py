@@ -81,6 +81,21 @@ class AgentAdapter(ABC):
     async def cancel(self, session_id: str) -> None:
         ...
 
+    async def recover_reply(self, session_id: str, ref: MessageRef) -> AgentReply | None:
+        """恢复时查询外部会话，判断某条消息是否已经产生回复。
+
+        返回 None 表示无法确认（调用方必须保持 UNKNOWN，不能盲目重发）。
+        """
+        return None
+
+    async def cancel_wait(self, session_id: str) -> None:
+        """只停止本地等待，不保证远端停止（默认复用 cancel）。"""
+        await self.cancel(session_id)
+
+    async def remote_abort(self, session_id: str) -> None:
+        """请求服务端真正中止执行；不支持的适配器应抛出 AdapterError。"""
+        await self.cancel(session_id)
+
     async def chat(self, session_id: str, text: str, *,
                    timeout: float | None = None) -> AgentReply:
         ref = await self.send_message(session_id, text, timeout=timeout)

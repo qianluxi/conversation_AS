@@ -127,11 +127,60 @@ async def _cmd_run(_config: AppConfig, adapters: dict[str, AgentAdapter],
         )
         print(f"\nrun_id = {result['run_id']}")
         print(f"approved = {result['approved']}  rounds = {result['rounds']}")
+        if result.get("error"):
+            print(f"error = {result['error']}")
+        if result.get("review_result"):
+            print("review_result =")
+            print(json.dumps(result["review_result"], ensure_ascii=False, indent=2))
         print("\n--- transcript ---")
         print(format_transcript(conversation.transcript()))
         return 0 if result["approved"] else 1
     finally:
         await conversation.close()
+
+
+async def _cmd_resume(_config: AppConfig, adapters: dict[str, AgentAdapter],
+                      store: Store, args: argparse.Namespace) -> int:
+    conversation = Conversation(store, adapters, run_id=args.run_id)
+    try:
+        print(f"run_id = {conversation.run_id}  status = {conversation.run.status.value}"
+              f"  phase = {conversation.run.phase.value}")
+        results = await conversation.resume(
+            timeout=args.timeout, allow_resend_unstarted=args.resend_unstarted,
+        )
+        if not results:
+            print("没有未完成的消息。")
+            return 0
+        for item in results:
+            detail = item.get("text") or item.get("reason") or ""
+            print(f"- {item['message_id']}: {item['action']}  {detail[:200]}")
+        unresolved = [item for item in results if item["action"] in ("unresolved", "error")]
+        return 1 if unresolved else 0
+    finally:
+        await conversation.close()
+
+
+async def _cmd_events(_config: AppConfig, store: Store, args: argparse.Namespace) -> int:
+    run = store.get_run(args.run_id)
+    if run is None:
+        print(f"未知 run_id: {args.run_id}", file=sys.stderr)
+        return 2
+    print(f"run_id = {run.run_id}")
+    print(f"goal   = {run.goal}")
+    print(f"status = {run.status.value}  phase = {run.phase.value}  turn = {run.current_turn}")
+    print("\n--- steps ---")
+    for step in store.list_steps(run.run_id):
+        started = step.started_at.strftime("%H:%M:%S") if step.started_at else "-"
+        finished = step.finished_at.strftime("%H:%M:%S") if step.finished_at else "-"
+        error = f" error={step.error[:80]}" if step.error else ""
+        print(f"{step.step_id} turn={step.turn_id} {step.agent}/{step.role} "
+              f"{step.state.value} {started}..{finished}{error}")
+    print("\n--- events ---")
+    for event in store.list_events(run.run_id):
+        stamp = event.created_at.strftime("%H:%M:%S")
+        payload = json.dumps(event.payload, ensure_ascii=False)
+        print(f"{event.seq:>3} {stamp} {event.phase.value:<18} {event.event_type:<22} {payload[:160]}")
+    return 0
 
 
 async def _cmd_demo(args: argparse.Namespace) -> int:
@@ -198,14 +247,14 @@ async def _cmd_transcript(store: Store, args: argparse.Namespace) -> int:
         return 2
     print(f"run_id = {run.run_id}")
     print(f"goal   = {run.goal}")
-    print(f"status = {run.status.value}")
+    print(f"status = {run.status.value}  phase = {run.phase.value}")
     print(format_transcript(store.list_messages(run_id)))
     return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentorchestrator",
-                                     description="WorkBuddy + OpenCode 双智能体编排器（阶段一）")
+                                     description="WorkBuddy + OpenCode 双智能体编排器（可靠性核心）")
     parser.add_argument("--config", default=None, help="配置文件路径（默认 config.yaml / config.example.yaml）")
     parser.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING / ERROR")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -239,6 +288,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     transcript = sub.add_parser("transcript", help="打印某个 run 的完整消息记录")
     transcript.add_argument("--run-id", default=None)
+
+    resume = sub.add_parser("resume", help="核对未完成消息的外部状态（默认不重发）")
+    resume.add_argument("--run-id", required=True)
+    resume.add_argument("--resend-unstarted", action="store_true",
+                        help="仅重发从未被服务端确认过的消息（attempt=0）")
+    resume.add_argument("--timeout", type=float, default=None)
+
+    events = sub.add_parser("events", help="查看 run 的状态机事件与节点记录")
+    events.add_argument("--run-id", required=True)
 
     auth = sub.add_parser("auth", help="WorkBuddy OAuth 授权")
     auth.add_argument("--agent", default=None)
@@ -287,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_cmd_chat(config, adapters, store, args))
         if args.command == "run":
             return asyncio.run(_cmd_run(config, adapters, store, args))
+        if args.command == "resume":
+            return asyncio.run(_cmd_resume(config, adapters, store, args))
+        if args.command == "events":
+            return asyncio.run(_cmd_events(config, store, args))
         if args.command == "auth":
             return asyncio.run(_cmd_auth(config, args))
     except KeyError as exc:

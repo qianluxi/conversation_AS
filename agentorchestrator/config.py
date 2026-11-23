@@ -31,6 +31,31 @@ def expand_env(value: Any, env: dict[str, str] | None = None) -> Any:
     return value
 
 
+class PermissionSettings(BaseModel):
+    """按操作类别划分的工具授权策略，匹配依据是工具名/标题中的关键词。"""
+
+    allow: list[str] = Field(
+        default_factory=lambda: ["read", "list", "search", "grep", "analyze"]
+    )
+    ask: list[str] = Field(
+        default_factory=lambda: ["write", "edit", "test", "network", "http", "fetch"]
+    )
+    deny: list[str] = Field(
+        default_factory=lambda: [
+            "install", "uninstall", "delete", "remove", "shell", "bash",
+            "terminal", "exec", "sudo", "format",
+        ]
+    )
+
+    def category(self, tool: str) -> Literal["allow", "ask", "deny"]:
+        text = (tool or "").lower()
+        for name in ("deny", "allow", "ask"):
+            for keyword in getattr(self, name):
+                if keyword and keyword.lower() in text:
+                    return name  # type: ignore[return-value]
+        return "ask"
+
+
 class OpencodeSettings(BaseModel):
     type: Literal["opencode"] = "opencode"
     base_url: str = "http://127.0.0.1:4096"
@@ -45,6 +70,7 @@ class OpencodeSettings(BaseModel):
     timeout: float = 300.0
     poll_interval: float = 1.0
     verify_ssl: bool = True
+    permissions: PermissionSettings = Field(default_factory=PermissionSettings)
 
 
 class WorkBuddyLocalSettings(BaseModel):
@@ -58,6 +84,7 @@ class WorkBuddyLocalSettings(BaseModel):
     timeout: float = 300.0
     poll_interval: float = 2.0
     verify_ssl: bool = True
+    permissions: PermissionSettings = Field(default_factory=PermissionSettings)
 
 
 class WorkBuddyAcpSettings(BaseModel):
@@ -74,6 +101,7 @@ class WorkBuddyAcpSettings(BaseModel):
     poll_interval: float = 2.0
     auto_approve: bool = False
     verify_ssl: bool = True
+    permissions: PermissionSettings = Field(default_factory=PermissionSettings)
 
 
 class MockSettings(BaseModel):
