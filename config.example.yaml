@@ -1,0 +1,62 @@
+# WorkBuddy + OpenCode 编排器配置（复制为 config.yaml 后修改）
+# 所有字符串值都支持 ${ENV_VAR} 与 ${ENV_VAR:-默认值} 展开。
+
+agents:
+  # WorkBuddy 本地助理（PC 端在线助理，OAuth 2.1）
+  # 适合：直接驱动桌面版 WorkBuddy 助理。
+  workbuddy:
+    type: workbuddy_local
+    base_url: https://www.workbuddy.cn
+    client_id: ${WORKBUDDY_CLIENT_ID}
+    client_secret: ${WORKBUDDY_CLIENT_SECRET}
+    redirect_uri: ${WORKBUDDY_REDIRECT_URI}
+    scope: "user.localassistant.readable user.localassistant.invokable"
+    token_file: data/workbuddy_token.json
+    timeout: 300
+    poll_interval: 2
+
+  # WorkBuddy 云端任务（ACP：SSE + JSON-RPC 2.0）
+  # 适合：长时间、流式、多轮讨论。需要 user.task.* 权限。
+  # 与上面的本地助理共用同一份 OAuth 应用和 token_file 即可。
+  # workbuddy_acp:
+  #   type: workbuddy_acp
+  #   base_url: https://www.workbuddy.cn
+  #   client_id: ${WORKBUDDY_CLIENT_ID}
+  #   client_secret: ${WORKBUDDY_CLIENT_SECRET}
+  #   redirect_uri: ${WORKBUDDY_REDIRECT_URI}
+  #   scope: "user.task.readable user.task.invokable"
+  #   token_file: data/workbuddy_token.json
+  #   bootstrap_prompt: "初始化协作会话，请等待后续指令。"
+  #   cwd: /workspace
+  #   timeout: 600
+  #   poll_interval: 2
+  #   auto_approve: false
+
+  opencode:
+    type: opencode
+    base_url: http://127.0.0.1:4096
+    username: opencode
+    password: ${OPENCODE_SERVER_PASSWORD}
+    # legacy: /session + /session/:id/prompt_async（兼容性最好）
+    # v2:     /api/session + /api/session/:id/prompt + /wait（1.19+）
+    api_style: legacy
+    # async: 先提交再轮询（推荐，可取消）；sync: 直接阻塞等待（仅 legacy）
+    delivery: async
+    # OpenCode 工作目录；不填则使用 OpenCode 服务端默认目录，建议填绝对路径。
+    # directory: F:/PyProjects/conversation_AS
+    # 可选：固定 agent / 模型
+    # agent: build
+    # provider_id: anthropic
+    # model_id: claude-sonnet-4
+    timeout: 300
+    poll_interval: 1
+
+  # 离线演示/测试用，不访问网络
+  # mock_planner:
+  #   type: mock
+  #   role: planner
+
+storage:
+  path: data/orchestrator.db
+
+log_level: INFO
