@@ -17,10 +17,12 @@ from .base import (
     AdapterError,
     AdapterRemoteError,
     AdapterTimeout,
+    AdapterUncertain,
     AgentAdapter,
     AgentReply,
     HealthStatus,
     MessageRef,
+    translate_transport_error,
 )
 
 log = logging.getLogger(__name__)
@@ -110,16 +112,21 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             response = await self._control_http().request(
                 method, f"{self._base}{path}", headers=headers, json=json_body,
             )
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise AdapterError(f"无法连接 WorkBuddy 控制面（{self._base}）：{exc}") from exc
         except httpx.HTTPError as exc:
-            raise AdapterError(f"请求 WorkBuddy 控制面失败：{exc}") from exc
+            raise translate_transport_error(exc, what="WorkBuddy 控制面") from exc
 
         if response.status_code in (401, 403):
             if retry_auth:
                 await self._auth.refresh()
                 return await self._control_request(method, path, retry_auth=False, json_body=json_body)
             raise AdapterAuthError("WorkBuddy 鉴权失败，请重新执行 OAuth 授权。")
+        if response.status_code >= 500:
+            raise AdapterUncertain(
+                f"WorkBuddy 控制面返回 {response.status_code}（结果不确定）：{response.text[:300]}",
+                status_code=response.status_code,
+            )
         if response.status_code >= 400:
             raise AdapterRemoteError(
                 f"WorkBuddy 控制面返回 {response.status_code}: {response.text[:500]}",
@@ -243,13 +250,20 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             response = await self._acp.post(
                 task.link, json=payload, headers=self._acp_headers(task), timeout=30.0,
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            raise AdapterError(f"无法连接 WorkBuddy ACP 通道：{exc}") from exc
         except httpx.HTTPError as exc:
-            raise AdapterError(f"向 WorkBuddy ACP 通道发送请求失败：{exc}") from exc
+            raise translate_transport_error(exc, what="WorkBuddy ACP 通道") from exc
         if response.status_code in (401, 403):
             if retry_auth:
                 await self._refresh_task_token(task)
                 return await self._post_acp(payload, task=task, retry_auth=False)
             raise AdapterAuthError("WorkBuddy ACP 鉴权失败，token 已失效。")
+        if response.status_code >= 500:
+            raise AdapterUncertain(
+                f"WorkBuddy ACP 返回 {response.status_code}（结果不确定）：{response.text[:300]}",
+                status_code=response.status_code,
+            )
         if response.status_code >= 400:
             raise AdapterRemoteError(
                 f"WorkBuddy ACP 返回 {response.status_code}: {response.text[:300]}",
@@ -417,7 +431,12 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             raise AdapterError(f"未知的 ACP 会话：{session_id}")
         limit = timeout if timeout is not None else self.settings.timeout
         lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        if lock.locked():
+            raise AdapterError(
+                "该 ACP 会话正在等待上一轮响应，禁止并发发送（避免流式 chunk 串扰）。"
+            )
+        await lock.acquire()
+        try:
             await self._ensure_ready(session, limit)
             if self._stream_error is not None:
                 raise AdapterError(f"ACP 连接不可用：{self._stream_error}")
@@ -436,8 +455,11 @@ class WorkBuddyAcpAdapter(AgentAdapter):
                             "prompt": [{"type": "text", "text": text}]}},
                 task=task,
             )
-            return MessageRef(session_id=session_id, message_id=f"acp-{rpc_id}",
-                              metadata={"rpc_id": rpc_id, "task_id": task.task_id})
+        except BaseException:
+            lock.release()
+            raise
+        return MessageRef(session_id=session_id, message_id=f"acp-{rpc_id}",
+                          metadata={"rpc_id": rpc_id, "task_id": task.task_id})
 
     async def wait_response(self, ref: MessageRef, *, timeout: float | None = None) -> AgentReply:
         rpc_id = ref.metadata.get("rpc_id")
@@ -448,8 +470,12 @@ class WorkBuddyAcpAdapter(AgentAdapter):
         try:
             result = await asyncio.wait_for(asyncio.shield(state.future), timeout=limit)
         except asyncio.TimeoutError as exc:
+            # 远端可能仍在执行：保留会话锁与 active 状态，等待 cancel/abort 或人工处理
             raise AdapterTimeout(f"等待 WorkBuddy ACP 响应超时（{limit}s）") from exc
         self._active_by_session.pop(state.task_id, None)
+        lock = self._locks.get(ref.session_id)
+        if lock is not None and lock.locked():
+            lock.release()
         return AgentReply(
             session_id=state.session_id,
             text="".join(state.parts).strip(),
@@ -459,7 +485,16 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             metadata={"rpc_id": state.rpc_id, "task_id": state.task_id},
         )
 
-    async def cancel(self, session_id: str) -> None:
+    async def cancel_wait(self, session_id: str) -> None:
+        session = self._sessions.get(session_id)
+        if session is not None and session.task is not None:
+            self._active_by_session.pop(session.task.task_id, None)
+        lock = self._locks.get(session_id)
+        if lock is not None and lock.locked():
+            lock.release()
+        log.warning("停止等待 ACP 响应（远端可能仍在执行）。")
+
+    async def remote_abort(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
         if session is None or session.task is None:
             return
@@ -469,10 +504,20 @@ class WorkBuddyAcpAdapter(AgentAdapter):
                  "params": {"sessionId": session.task.task_id}},
                 task=session.task,
             )
+        finally:
+            await self.cancel_wait(session_id)
+
+    async def cancel(self, session_id: str) -> None:
+        try:
+            await self.remote_abort(session_id)
         except AdapterError as exc:
             log.warning("发送 ACP cancel 失败：%s", exc)
+            await self.cancel_wait(session_id)
 
     async def aclose(self) -> None:
+        for lock in self._locks.values():
+            if lock.locked():
+                lock.release()
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:

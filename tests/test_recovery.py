@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+
+from agentorchestrator.adapters.base import MessageRef
 from agentorchestrator.adapters.opencode import OpenCodeAdapter
 from agentorchestrator.config import OpencodeSettings
 from agentorchestrator.messaging.schema import (
@@ -121,3 +124,44 @@ def test_resend_unstarted_message_only_when_explicit(tmp_path: Path) -> None:
         assert reloaded.status is MessageStatus.COMPLETED
         assert reloaded.attempt == 1
         store.close()
+
+
+def _v2_handler(candidates: list[dict]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/session/ses_v2/message":
+            return httpx.Response(200, json={"data": candidates, "cursor": {}})
+        return httpx.Response(404, json={"error": request.url.path})
+
+    return httpx.MockTransport(handler)
+
+
+def test_v2_recovery_requires_unique_assistant_candidate() -> None:
+    def assistant(message_id: str, text: str, finished: bool = True) -> dict:
+        return {
+            "id": message_id, "type": "assistant",
+            "content": [{"type": "text", "id": f"{message_id}-t", "text": text}],
+            "time": {"created": 1, "completed": 2} if finished else {"created": 1},
+            "agent": "build", "model": {"id": "m", "providerID": "p"},
+        }
+
+    ambiguous = [assistant("msg_a", "a"), assistant("msg_b", "b")]
+
+    async def scenario() -> tuple[object, object]:
+        settings = OpencodeSettings(base_url="http://oc.test", api_style="v2",
+                                    poll_interval=0.01, timeout=3)
+        ref = MessageRef(session_id="ses_v2", message_id="msg_p1",
+                         metadata={"api_style": "v2", "baseline_assistant_ids": []})
+        async with httpx.AsyncClient(transport=_v2_handler(ambiguous)) as client:
+            adapter = OpenCodeAdapter("oc", settings, client=client)
+            first = await adapter.recover_reply("ses_v2", ref)
+        async with httpx.AsyncClient(
+            transport=_v2_handler([assistant("msg_a", "唯一的回复")])
+        ) as client:
+            adapter = OpenCodeAdapter("oc", settings, client=client)
+            second = await adapter.recover_reply("ses_v2", ref)
+        return first, second
+
+    first, second = run(scenario())
+    assert first is None
+    assert second is not None
+    assert second.text == "唯一的回复"

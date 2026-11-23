@@ -4,7 +4,9 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
+from agentorchestrator.adapters.base import AdapterError
 from agentorchestrator.adapters.workbuddy_acp import WorkBuddyAcpAdapter
 from agentorchestrator.config import PermissionSettings, WorkBuddyAcpSettings
 
@@ -181,3 +183,33 @@ def test_permission_settings_categories() -> None:
     assert policy.category("Write file") == "ask"
     assert policy.category("Bash: rm -rf build") == "deny"
     assert policy.category("unknown-tool") == "ask"
+
+
+def test_second_prompt_before_wait_is_rejected() -> None:
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=3, poll_interval=0.01,
+    )
+    transport = FakeACPTransport("Write file")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                ref1 = await adapter.send_message(session_id, "one")
+                with pytest.raises(AdapterError):
+                    await adapter.send_message(session_id, "two")
+                reply1 = await adapter.wait_response(ref1, timeout=3)
+                assert reply1.text == "hello world"
+                ref2 = await adapter.send_message(session_id, "two")
+                reply2 = await adapter.wait_response(ref2, timeout=3)
+                assert reply2.text == "hello world"
+            finally:
+                await adapter.aclose()
+
+    run(scenario())

@@ -127,3 +127,44 @@ class RunEvent(BaseModel):
     step_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class InvalidTransition(RuntimeError):
+    """非法的 run 状态迁移（例如终态回退）。"""
+
+
+TERMINAL_PHASES: frozenset[RunPhase] = frozenset({
+    RunPhase.COMPLETED, RunPhase.FAILED, RunPhase.CANCELLED,
+})
+TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({
+    RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED,
+})
+
+ALLOWED_PHASE_TRANSITIONS: dict[RunPhase, frozenset[RunPhase]] = {
+    RunPhase.CREATED: frozenset({
+        RunPhase.ANALYZING, RunPhase.EXECUTING, RunPhase.REVIEWING,
+        RunPhase.RECOVERING, RunPhase.FAILED, RunPhase.CANCELLED,
+    }),
+    RunPhase.ANALYZING: frozenset({
+        RunPhase.EXECUTING, RunPhase.RECOVERING, RunPhase.FAILED, RunPhase.CANCELLED,
+    }),
+    RunPhase.EXECUTING: frozenset({
+        RunPhase.REVIEWING, RunPhase.RECOVERING, RunPhase.FAILED, RunPhase.CANCELLED,
+    }),
+    RunPhase.REVIEWING: frozenset({
+        RunPhase.REVISION_REQUIRED, RunPhase.APPROVED, RunPhase.RECOVERING,
+        RunPhase.FAILED, RunPhase.CANCELLED,
+    }),
+    RunPhase.REVISION_REQUIRED: frozenset({
+        RunPhase.EXECUTING, RunPhase.RECOVERING, RunPhase.FAILED, RunPhase.CANCELLED,
+    }),
+    RunPhase.RECOVERING: frozenset({
+        RunPhase.CREATED, RunPhase.ANALYZING, RunPhase.EXECUTING, RunPhase.REVIEWING,
+        RunPhase.REVISION_REQUIRED, RunPhase.APPROVED, RunPhase.COMPLETED,
+        RunPhase.FAILED, RunPhase.CANCELLED,
+    }),
+    RunPhase.APPROVED: frozenset({RunPhase.COMPLETED, RunPhase.FAILED}),
+    RunPhase.COMPLETED: frozenset(),
+    RunPhase.FAILED: frozenset(),
+    RunPhase.CANCELLED: frozenset(),
+}

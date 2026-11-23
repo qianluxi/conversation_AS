@@ -1,16 +1,18 @@
 # WorkBuddy + OpenCode 双智能体编排器
 
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
-会话映射、消息协议、状态机、结构化审查、持久化与恢复。当前实现第二阶段的核心
-可靠性能力，仍然不包含 GUI 与配置化工作流。
+会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
+
+> 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
+> OAuth、命令、故障处理手册）。
 
 ```
 用户目标
    │
    ▼
 Orchestrator（本仓库）
-   ├── WorkBuddyAdapter   ──► 本地助理 REST（OAuth 2.1，全局互斥）
-   ├── WorkBuddyACPAdapter ─► 云端任务 ACP（SSE + JSON-RPC 2.0）
+   ├── WorkBuddyAdapter   ──► 本地助理 REST（OAuth 2.1，远端状态门）
+   ├── WorkBuddyACPAdapter ─► 云端任务 ACP（SSE + JSON-RPC 2.0，会话串行）
    ├── OpenCodeAdapter    ──► opencode serve（REST，legacy 或 v2）
    └── SQLite（runs / sessions / messages / steps / run_events）
 ```
@@ -24,19 +26,16 @@ python -m agentorchestrator transcript --run-id <run_id>
 python -m agentorchestrator events --run-id <run_id>
 ```
 
-`demo` 使用 MockAdapter 跑完整的 分析 → 执行 → 结构化审查 流程，消息、步骤和
-状态机事件写入 `data/demo.db`。
+## 核心可靠性设计（v0.3）
 
-## 可靠性设计（v0.2）
+### 1. 结构化审查（无关键字放行）
 
-### 1. 结构化审查，不再匹配 `APPROVED` 子串
-
-审查者必须返回 JSON，由 `agentorchestrator/review.py` 用 Pydantic 校验：
+审查者必须返回 JSON，`agentorchestrator/review.py` 使用 Pydantic 严格校验：
 
 ```json
 {
   "decision": "approved | revision_required | blocked",
-  "summary": "一句话结论",
+  "summary": "不能为空",
   "findings": [
     {"severity": "high", "file": "a.py", "location": "L42",
      "problem": "存在数据泄漏", "suggested_action": "调整时间窗口"}
@@ -46,75 +45,100 @@ python -m agentorchestrator events --run-id <run_id>
 }
 ```
 
-- `approved` 只在 `decision == "approved"` 时成立；
-- 「我不认为已经达到 APPROVED 的标准」解析失败，**不会**被自动批准；
-- JSON 缺失、字段非法、decision 未知 → 运行标记为 `FAILED`，原因 `invalid_review`；
-- `blocked` 直接终止；`revision_required` 把结构化 findings 回传给执行者。
+- 未知字段、缺字段、空 `summary` → 非法；
+- `approved` 必须至少一条非空 `evidence`，且 `confidence >= 0.8`；
+- 存在 `high`/`critical` finding 时禁止 `approved`；
+- 「我不认为已经达到 APPROVED 的标准」无法解析，按失败处理，不会误批准。
 
-### 2. 持久化状态机与节点记录
+### 2. 持久化状态机与审计
 
-- run：`status`（running/completed/failed/cancelled）+ `phase`
-  （created → analyzing → executing → reviewing → revision_required / approved →
-  completed / failed）。
-- 每次状态变化写入 `run_events`（seq、事件类型、phase、step、payload）。
-- 每个 agent 每轮执行记录为 `steps`（开始/结束时间、attempt、输入/输出消息、
-  错误），用于定位卡在哪一步。
+```
+created → analyzing → executing → reviewing
+                          ├── revision_required → executing ...
+                          └── approved → completed
+任意阶段 → failed / cancelled
+```
+
+- 终态（completed / failed / cancelled）不可回退，`transition_run()` 在同一个
+  SQLite 事务里更新状态并写入 `run_events`；
+- `steps` 记录每个节点开始/结束时间、attempt、输入/输出消息和错误；
 - 消息状态：`created / sending / sent / acknowledged / completed / failed /
   unknown / cancelled`。
-
-查看：
 
 ```powershell
 python -m agentorchestrator events --run-id <run_id>
 ```
 
-### 3. 不盲目重发：UNKNOWN 与恢复
+### 3. 结果不确定时不猜：UNKNOWN + 恢复
 
-- 发送阶段确定失败（未送达）→ `FAILED`；
-- 发送或等待阶段超时/断线 → `UNKNOWN`（外部可能已经执行）；
-- `dedupe_key` 唯一索引只防本地重复写入，因此：
+- 连接建立前失败、明确的 4xx → `FAILED`（未送达，可安全重试）；
+- ReadTimeout / WriteTimeout / WriteError / RemoteProtocolError / 5xx →
+  `AdapterUncertain` → 消息 `UNKNOWN`（可能已执行，禁止自动重发）；
+- 等待响应超时 → `UNKNOWN`；
+- `dedupe_key` 唯一索引只保证本地幂等，远端恢复依赖 `recover_reply()`。
 
 ```powershell
-# 只做核对，默认绝不重发
-python -m agentorchestrator resume --run-id <run_id>
-
-# 仅重发从未被服务端确认过（attempt=0、无 provider_message_id）的消息
-python -m agentorchestrator resume --run-id <run_id> --resend-unstarted
+python -m agentorchestrator pending
+python -m agentorchestrator resume  --run-id <id>                    # 只核对
+python -m agentorchestrator resume  --run-id <id> --resend-unstarted # 仅重发 attempt=0
+python -m agentorchestrator release --run-id <id> --message-id <id> --force
 ```
 
-`resume` 会通过适配器的 `recover_reply()` 查询外部会话：
-OpenCode 按 `parentID`/基线消息 ID 核对，WorkBuddy 本地助理按增量消息历史核对。
-ACP 目前无法可靠关联历史轮次，会保持 UNKNOWN，需人工决定。
+### 4. 原子完成，消除回复丢失窗口
 
-注意：`resume` 只核对/补齐消息，不会自动继续整个工作流；阶段二会补上工作流级
-断点续跑。
+`Store.complete_exchange()` 在**同一个事务**内完成：
 
-### 4. WorkBuddy 本地助理全局互斥与取消语义
+1. 插入回复消息；2. 原消息标为 completed；3. 收尾 step；4. 更新 current_turn；
+5. 写入 message_completed / step_completed 事件。
 
-本地助理没有独立 session，且同一账号只能有一个进行中的对话：
+任一步失败全部回滚；`resume` 还会修复历史不一致（消息 completed 但回复缺失时
+将 step 标为 failed）。
 
-- 同一 `base_url` 的所有适配器实例共享同一把 `asyncio.Lock`（`build_adapters`
-  注入），第二个任务会立即报错，而不是串话；
-- 区分三种取消：
-  - `cancel_wait()`：只停止本地等待，服务端可能继续执行；
-  - `remote_abort()`：本地助理 API 不支持，明确抛错；
-  - `cancel()`：保守地等同 `cancel_wait()`。
-- 跨进程并发不在本版本保护范围内（同一时刻只运行一个协调器进程）。
+### 5. WorkBuddy 本地助理：显式远端状态门
 
-### 5. 工具权限策略
+```
+IDLE → SUBMITTED → RUNNING → IDLE
+                       └────> QUARANTINED（超时/断线/取消等待）
+```
 
-按 agent 配置关键词策略，`deny` 优先于 `auto_approve`：
+- 同一 `base_url` 的所有适配器共享一个 `LocalAssistantGate`；
+- 等待超时**不释放**远端占用，而是进入 `QUARANTINED`，新消息被立即拒绝；
+- `recover_reply()` 查到回复才自动解除；否则需要
+  `release --force` 人工确认；
+- 跨 run 保护：只要数据库里存在 `workbuddy_local` 的未确认消息，`ask()` 就会拒绝；
+- 三种取消语义：`cancel_wait()`（只停本地）、`remote_abort()`（不支持，明确抛错）、
+  `cancel()`（保守等于 `cancel_wait()`）。
+
+### 6. 工具权限：token/能力匹配
+
+按 operation 分类，不做子串匹配：
+
+| 工具 | operations | 默认 |
+| --- | --- | --- |
+| `read_file` | read | allow |
+| `spreadsheet.write` | write | ask |
+| `thread.create` | write | ask |
+| `execute_command` / `Bash` | execute | deny |
+| `file.remove` | delete | deny |
+| 无法识别 | — | ask |
+
+复合操作取最严格（`read+delete` → deny）；`deny` 优先于 `auto_approve`。
+配置：
 
 ```yaml
 permissions:
-  allow: [read, list, search, grep, analyze]
-  ask: [write, edit, test, network, http, fetch]
-  deny: [install, delete, remove, shell, bash, terminal, exec, sudo]
+  allow: [read]
+  ask: [write, test, network]
+  deny: [execute, delete, install]
 ```
 
-ACP `session/request_permission` 会先分类工具名/标题，再决定同意、询问还是拒绝；
-未识别工具默认 `ask`，未配置 handler 且未开启 `auto_approve` 时拒绝。
-OpenCode 侧暂无同等拦截，需依赖其自身权限配置。
+### 7. 并发关联
+
+- 本地助理：全局状态门，禁止两个任务同时占用；
+- ACP：`send_message → wait_response` 期间持有会话锁，第二条 prompt 直接报错，
+  避免 `agent_message_chunk` 关联到错误轮次；
+- OpenCode v2 恢复：仅当"基线之后恰好一条 assistant 消息"时才恢复，多候选
+  一律返回 `None` 保留 UNKNOWN。
 
 ## 接入 OpenCode
 
@@ -127,55 +151,44 @@ python -m agentorchestrator --config config.yaml health
 python -m agentorchestrator --config config.yaml send --agent opencode --text "介绍这个仓库"
 ```
 
-已核对本机 OpenCode 1.19.0 的实际接口（以 `/doc` OpenAPI 为准）：
+已核对本机 OpenCode 1.19.0 的接口（以 `/doc` OpenAPI 为准）：
 
 | 用途 | legacy（默认） | v2 |
 | --- | --- | --- |
 | 创建会话 | `POST /session` | `POST /api/session` |
 | 异步发送 | `POST /session/{id}/prompt_async` | `POST /api/session/{id}/prompt` |
 | 同步发送 | `POST /session/{id}/message` | — |
-| 查询消息 | `GET /session/{id}/message` → `[{info, parts}]` | `GET /api/session/{id}/message` → `{data}` |
+| 查询消息 | `GET /session/{id}/message` | `GET /api/session/{id}/message` |
 | 等待空闲 | 轮询 | `POST /api/session/{id}/wait` |
 | 中止 | `POST /session/{id}/abort` | `POST /api/session/{id}/interrupt` |
 
-鉴权：`OPENCODE_SERVER_PASSWORD` + 用户名 `opencode`（Basic Auth）。
-
 ## 接入 WorkBuddy
 
-### 1. OAuth 2.1
+### OAuth 2.1
 
 ```powershell
 python -m agentorchestrator auth url
-# 授权后拿到 code
 python -m agentorchestrator auth exchange <code>
 python -m agentorchestrator auth status
 ```
 
 token 保存在 `data/workbuddy_token.json`（已 gitignore），过期自动刷新。
 
-### 2. 本地助理（默认）
+### 本地助理
 
 ```powershell
 python -m agentorchestrator send --agent workbuddy --text "帮我查一下今天的日程"
 ```
 
-接口：`GET /openapi/v2/localassistant`、`POST /openapi/v2/localassistant/message`、
-`GET /openapi/v2/localassistant/message?message_id=...`。
-
-### 3. 云端任务 ACP（可选）
-
-启用 `config.yaml` 中的 `workbuddy_acp` 后：
+### 云端任务 ACP（可选）
 
 ```powershell
 python -m agentorchestrator send --agent workbuddy_acp --text "分析这个项目的风险"
 ```
 
-流程：`POST /openapi/v2/tasks` → 轮询 `GET /api/v2/tasks/{id}` 拿 `link`/`token` →
-`GET {link}` 建立 SSE（`Acp-Connection-Id`）→ `initialize` / `session/load` /
-`session/prompt`。流式文本来自 `session/update` 的 `agent_message_chunk`。
-
-限制：一个适配器实例只持有一个 ACP SSE 连接；建任务时必须带初始 prompt，因此用
-`bootstrap_prompt` 初始化；ACP 历史轮次无法在重启后可靠恢复。
+`POST /openapi/v2/tasks` → 轮询 `link/token` → SSE（`Acp-Connection-Id`）→
+`initialize` / `session/load` / `session/prompt`。限制：单连接、单活动 prompt、
+重启后无法恢复历史轮次。
 
 ## 常用命令
 
@@ -187,13 +200,12 @@ python -m agentorchestrator health
 python -m agentorchestrator send --agent workbuddy --text "..."
 python -m agentorchestrator chat
 python -m agentorchestrator run --goal "审查特征工程模块" --max-rounds 2
-python -m agentorchestrator transcript --run-id <run_id>
-python -m agentorchestrator events --run-id <run_id>
-python -m agentorchestrator resume --run-id <run_id>
+python -m agentorchestrator transcript [--run-id <id>]
+python -m agentorchestrator events --run-id <id>
+python -m agentorchestrator pending [--provider workbuddy_local]
+python -m agentorchestrator resume --run-id <id> [--resend-unstarted]
+python -m agentorchestrator release --run-id <id> --message-id <id> [--force]
 ```
-
-`run` 默认 `workbuddy` 做分析与审查、`opencode` 做执行；只有结构化审查返回
-`approved` 才提前结束，否则把 findings 回传执行者，直到 `max_rounds`（超限记为失败）。
 
 ## 设计要点
 
@@ -203,8 +215,7 @@ python -m agentorchestrator resume --run-id <run_id>
 - **三 ID 分离**：`run_id`、`provider_session_id`、`message_id` 严格区分。
 - **Outbox 式记录**：先写 `created`，发送前 `sending`，服务端接受后
   `acknowledged`，完成才 `completed`；超时/断线保留 `unknown`。
-- **幂等**：`dedupe_key` 唯一索引；`FAILED` 消息可安全重试，`UNKNOWN` 不允许自动
-  重发。SQLite 只能保证本地幂等，远端恢复依赖 `recover_reply`。
+- **幂等**：`dedupe_key` 唯一索引；`FAILED` 可安全重试，`UNKNOWN` 必须核对或人工释放。
 - **可扩展**：新增智能体只需实现 `AgentAdapter` 并在
   `agentorchestrator/adapters/__init__.py` 注册。
 
@@ -213,15 +224,16 @@ python -m agentorchestrator resume --run-id <run_id>
 ```
 agentorchestrator/
 ├── adapters/            # base / opencode / workbuddy_local / workbuddy_acp / mock
-├── messaging/schema.py  # Message / Run / Step / RunEvent / 枚举
-├── storage/database.py  # SQLite（WAL，迁移兼容旧库）
+├── messaging/schema.py  # Message / Run / Step / RunEvent / 迁移表
+├── storage/database.py  # SQLite（WAL、迁移兼容、事务化完成）
 ├── orchestrator/engine.py
 ├── review.py            # 结构化审查协议
 ├── auth.py              # WorkBuddy OAuth 2.1
 ├── sse.py
 ├── config.py
 └── cli.py
-tests/                   # 单元测试 + fake server 双向通信 + 恢复/权限测试
+docs/USER_GUIDE.md
+tests/                   # 55 项：单元 + fake server + 故障注入
 ```
 
 ## 测试
@@ -230,14 +242,14 @@ tests/                   # 单元测试 + fake server 双向通信 + 恢复/权�
 python -m pytest
 ```
 
-测试不需要真实凭据：OpenCode / WorkBuddy 本地助理使用 `httpx.MockTransport`，
-ACP 使用自定义 SSE 传输，端到端测试在 `127.0.0.1` 启动两个模拟服务，覆盖
-结构化审查拒批、UNKNOWN 恢复、未确认消息不重发、本地助理互斥和权限策略。
+测试不需要真实凭据，覆盖：结构化审查拒批（缺 evidence/低置信度/高危 finding）、
+权限误分类（`spreadsheet.write`、`thread.create`）、超时后隔离与恢复、
+UNKNOWN 不重发、完成事务回滚、终态不可逆、ACP 并发 prompt、
+OpenCode v2 多候选恢复等。
 
-## 后续（阶段二/三）
+## 后续（阶段三）
 
-1. 工作流 YAML 化与工作流级断点续跑（当前只恢复消息，不自动继续流程）。
-2. 重启时主动查询 OpenCode/ACP 会话状态并自动补齐节点。
-3. 跨进程互斥（文件锁）与本地任务队列。
-4. FastAPI 管理接口 + Web 界面（`web` extra）。
-5. 第三个智能体、角色与品牌解耦、并行执行（代码写入保持单写者）。
+1. 工作流 YAML 化与工作流级断点续跑（当前只恢复消息）。
+2. 跨进程互斥（文件锁）与持久化任务队列。
+3. FastAPI 管理接口 + Web 界面（`web` extra）。
+4. 角色与品牌解耦、第三/第四个智能体、并行执行（代码写入保持单写者）。

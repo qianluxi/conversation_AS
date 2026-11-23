@@ -5,7 +5,7 @@ import re
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 class ReviewParseError(ValueError):
@@ -21,25 +21,40 @@ class Severity(str, Enum):
 
 
 class Finding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     severity: Severity = Severity.MEDIUM
     file: str | None = None
     location: str | None = None
-    problem: str
+    problem: str = Field(min_length=1)
     suggested_action: str | None = None
 
 
+MIN_APPROVAL_CONFIDENCE = 0.8
+
+
 class ReviewResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     decision: Literal["approved", "revision_required", "blocked"]
-    summary: str = ""
+    summary: str = Field(min_length=1)
     findings: list[Finding] = Field(default_factory=list)
-    evidence: list[str] = Field(default_factory=list)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence: list[str]
+    confidence: float = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _self_consistent(self) -> "ReviewResult":
+        if any(not item.strip() for item in self.evidence):
+            raise ValueError("evidence 中不能有空字符串")
         if self.decision == "revision_required" and not self.findings:
             raise ValueError("revision_required 必须至少包含一条 findings")
         if self.decision == "approved":
+            if not self.evidence:
+                raise ValueError("approved 必须至少提供一条 evidence")
+            if self.confidence < MIN_APPROVAL_CONFIDENCE:
+                raise ValueError(
+                    f"approved 的 confidence 不得低于 {MIN_APPROVAL_CONFIDENCE}"
+                )
             severe = [f for f in self.findings
                       if f.severity in (Severity.HIGH, Severity.CRITICAL)]
             if severe:
@@ -51,24 +66,26 @@ class ReviewResult(BaseModel):
         return self.decision == "approved"
 
 
-REVIEW_CONTRACT = """只输出一个 JSON 对象，不要输出 JSON 之外的任何文字。格式：
-{
+REVIEW_CONTRACT = f"""只输出一个 JSON 对象，不要输出 JSON 之外的任何文字。格式：
+{{
   "decision": "approved" | "revision_required" | "blocked",
-  "summary": "一句话结论",
+  "summary": "一句话结论（不能为空）",
   "findings": [
-    {
+    {{
       "severity": "info" | "low" | "medium" | "high" | "critical",
       "file": "相对路径或 null",
       "location": "行号/函数名或 null",
       "problem": "问题描述",
       "suggested_action": "建议修改方式或 null"
-    }
+    }}
   ],
-  "evidence": ["可复核的证据，例如命令、文件片段、测试结果"],
+  "evidence": ["可复核的证据，例如命令、文件片段、测试结果（approved 时不能为空）"],
   "confidence": 0.0
-}
-规则：只有证据充分且确认满足要求时才允许 approved；存在必须修改的问题时用
-revision_required；无法完成审查或缺少关键信息时用 blocked。findings 必须如实列出。"""
+}}
+规则：只有证据充分且确认满足要求时才允许 approved；approved 至少需要一条
+evidence 且 confidence >= {MIN_APPROVAL_CONFIDENCE}；存在 high/critical finding
+时不能 approved；revision_required 必须至少有一条 finding；无法完成审查或缺少
+关键信息时用 blocked。不得输出未定义的字段。"""
 
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 

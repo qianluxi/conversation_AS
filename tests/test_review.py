@@ -44,18 +44,53 @@ def test_confidence_out_of_range_is_rejected() -> None:
 
 
 def test_wrapped_review_object_is_accepted() -> None:
-    result = parse_review_result('{"review": {"decision": "blocked", "summary": "信息不足"}}')
+    result = parse_review_result(
+        '{"review": {"decision": "blocked", "summary": "信息不足",'
+        ' "evidence": [], "confidence": 0.4}}'
+    )
     assert result.decision == "blocked"
+
+
+def test_approved_requires_evidence() -> None:
+    with pytest.raises(ReviewParseError):
+        parse_review_result(
+            '{"decision": "approved", "summary": "ok", "evidence": [], "confidence": 0.95}'
+        )
+
+
+def test_approved_requires_confidence_threshold() -> None:
+    with pytest.raises(ReviewParseError):
+        parse_review_result(
+            '{"decision": "approved", "summary": "ok",'
+            ' "evidence": ["pytest"], "confidence": 0.5}'
+        )
+
+
+def test_unknown_field_is_rejected() -> None:
+    with pytest.raises(ReviewParseError):
+        parse_review_result(
+            '{"decision": "blocked", "summary": "x", "evidence": [],'
+            ' "confidence": 0.4, "extra": 1}'
+        )
+
+
+def test_minimal_approved_is_rejected() -> None:
+    with pytest.raises(ReviewParseError):
+        parse_review_result('{"decision": "approved"}')
 
 
 def test_revision_required_needs_findings() -> None:
     with pytest.raises(ReviewParseError):
-        parse_review_result('{"decision": "revision_required", "summary": "有问题"}')
+        parse_review_result(
+            '{"decision": "revision_required", "summary": "有问题",'
+            ' "evidence": [], "confidence": 0.7}'
+        )
 
 
 def test_approved_with_high_severity_finding_is_rejected() -> None:
     with pytest.raises(ReviewParseError):
         parse_review_result(
-            '{"decision": "approved", "findings": ['
+            '{"decision": "approved", "summary": "x", "evidence": ["e"],'
+            ' "confidence": 0.95, "findings": ['
             '{"severity": "high", "problem": "严重问题"}]}'
         )

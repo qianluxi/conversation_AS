@@ -10,3 +10,6 @@ config.yaml
 *.db-wal
 *.db-shm
 .pytest_cache/
+*.rar
+*.zip
+*.7z

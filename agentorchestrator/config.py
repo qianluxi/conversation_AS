@@ -31,29 +31,134 @@ def expand_env(value: Any, env: dict[str, str] | None = None) -> Any:
     return value
 
 
-class PermissionSettings(BaseModel):
-    """按操作类别划分的工具授权策略，匹配依据是工具名/标题中的关键词。"""
+_CAMEL_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
+_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
 
-    allow: list[str] = Field(
-        default_factory=lambda: ["read", "list", "search", "grep", "analyze"]
-    )
-    ask: list[str] = Field(
-        default_factory=lambda: ["write", "edit", "test", "network", "http", "fetch"]
-    )
+_OPERATION_SYNONYMS: dict[str, set[str]] = {
+    "execute": {
+        "execute", "exec", "run", "command", "cmd", "shell", "bash", "powershell",
+        "pwsh", "sh", "terminal", "spawn", "subprocess", "script",
+    },
+    "delete": {
+        "delete", "remove", "rm", "del", "unlink", "destroy", "drop", "truncate",
+        "purge", "erase", "format", "wipe",
+    },
+    "install": {
+        "install", "uninstall", "reinstall", "pip", "npm", "yarn", "apt", "brew",
+        "yum", "package", "dependency", "dependencies",
+    },
+    "write": {
+        "write", "edit", "modify", "patch", "update", "create", "append", "save",
+        "put", "set", "insert", "replace", "rename", "move", "copy",
+    },
+    "network": {
+        "network", "http", "https", "url", "request", "fetch", "curl", "wget",
+        "browse", "web", "download", "upload",
+    },
+    "test": {
+        "test", "tests", "pytest", "jest", "unittest", "spec", "check", "lint",
+        "ruff", "mypy",
+    },
+    "read": {
+        "read", "view", "list", "search", "grep", "find", "glob", "cat", "open",
+        "inspect", "analyze", "analyse", "scan", "stat", "query", "get", "lookup",
+        "ls", "dir",
+    },
+}
+
+_TOKEN_OPERATION: dict[str, str] = {}
+for _operation, _words in _OPERATION_SYNONYMS.items():
+    for _word in _words:
+        _TOKEN_OPERATION.setdefault(_word, _operation)
+
+_OPERATIONS = set(_OPERATION_SYNONYMS)
+
+_DEFAULT_OPERATION_CATEGORY: dict[str, str] = {
+    "read": "allow",
+    "write": "ask",
+    "test": "ask",
+    "network": "ask",
+    "execute": "deny",
+    "delete": "deny",
+    "install": "deny",
+}
+
+_STRICTNESS = {"allow": 0, "ask": 1, "deny": 2}
+
+
+def tokenize_tool(tool: str) -> set[str]:
+    """把工具名/标题拆成 token（含 camelCase），用于精确匹配而非子串匹配。"""
+    if not tool:
+        return set()
+    spaced = _CAMEL_BOUNDARY.sub(r"\1 \2", str(tool))
+    return {token.lower() for token in _TOKEN_SPLIT.split(spaced) if token}
+
+
+class ToolCapability(BaseModel):
+    name: str
+    tokens: set[str] = Field(default_factory=set)
+    operations: set[str] = Field(default_factory=set)
+    category: Literal["allow", "ask", "deny"] = "ask"
+
+
+class PermissionSettings(BaseModel):
+    """基于工具能力（operation）的授权策略。
+
+    - 只做 token 级匹配，避免 "spreadsheet.write" 因为包含 "read" 被放行；
+    - 同一工具包含多种操作时取最严格类别（deny > ask > allow）；
+    - 无法识别操作类型的工具一律 ask。
+    """
+
+    allow: list[str] = Field(default_factory=lambda: ["read"])
+    ask: list[str] = Field(default_factory=lambda: ["write", "test", "network"])
     deny: list[str] = Field(
-        default_factory=lambda: [
-            "install", "uninstall", "delete", "remove", "shell", "bash",
-            "terminal", "exec", "sudo", "format",
-        ]
+        default_factory=lambda: ["execute", "delete", "install"]
     )
+
+    @staticmethod
+    def _ops_for(value: str) -> set[str]:
+        ops: set[str] = set()
+        for token in tokenize_tool(value):
+            if token in _OPERATIONS:
+                ops.add(token)
+            elif token in _TOKEN_OPERATION:
+                ops.add(_TOKEN_OPERATION[token])
+        return ops
+
+    def _operation_categories(self) -> dict[str, str]:
+        mapping = dict(_DEFAULT_OPERATION_CATEGORY)
+        explicit = set(getattr(self, "model_fields_set", set())) & {"allow", "ask", "deny"}
+        if not explicit:
+            return mapping
+        configured: dict[str, str] = {}
+        # 显式配置内部同样按 allow -> ask -> deny 处理，冲突时更严格者胜出。
+        for category in ("allow", "ask", "deny"):
+            if category not in explicit:
+                continue
+            for item in getattr(self, category):
+                for operation in self._ops_for(item):
+                    configured[operation] = category
+        mapping.update(configured)
+        return mapping
+
+    def classify(self, tool: str) -> ToolCapability:
+        tokens = tokenize_tool(tool)
+        operations = {
+            _TOKEN_OPERATION[token] for token in tokens if token in _TOKEN_OPERATION
+        }
+        operations |= {token for token in tokens if token in _OPERATIONS}
+        if not operations:
+            return ToolCapability(name=tool, tokens=tokens, operations=set(),
+                                  category="ask")
+        mapping = self._operation_categories()
+        categories = {mapping.get(operation, "ask") for operation in operations}
+        category = max(categories, key=lambda item: _STRICTNESS[item])
+        return ToolCapability(name=tool, tokens=tokens, operations=operations,
+                              category=category)
 
     def category(self, tool: str) -> Literal["allow", "ask", "deny"]:
-        text = (tool or "").lower()
-        for name in ("deny", "allow", "ask"):
-            for keyword in getattr(self, name):
-                if keyword and keyword.lower() in text:
-                    return name  # type: ignore[return-value]
-        return "ask"
+        return self.classify(tool).category
+
 
 
 class OpencodeSettings(BaseModel):

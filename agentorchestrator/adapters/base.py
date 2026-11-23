@@ -5,9 +5,15 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 
 class AdapterError(RuntimeError):
-    """适配器基类错误。"""
+    """适配器基类错误。未送达/明确拒绝时使用。"""
+
+
+class AdapterUncertain(AdapterError):
+    """请求可能已被服务端接受，但本地无法确认。必须按 UNKNOWN 处理，禁止自动重发。"""
 
 
 class AdapterAuthError(AdapterError):
@@ -16,6 +22,21 @@ class AdapterAuthError(AdapterError):
 
 class AdapterTimeout(AdapterError):
     """等待响应超时。"""
+
+
+def translate_transport_error(exc: httpx.HTTPError, *, what: str = "远端") -> AdapterError:
+    """把 httpx 异常映射为「确定未送达」或「结果不确定」。
+
+    - 连接建立前失败（ConnectError / ConnectTimeout / PoolTimeout）→ 可安全重试；
+    - ReadTimeout → 请求已发出、响应未到 → 不确定；
+    - WriteTimeout / WriteError / ReadError / RemoteProtocolError 等 → 不确定；
+    - 其余保守归为不确定。
+    """
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return AdapterError(f"无法连接{what}：{exc}")
+    if isinstance(exc, httpx.ReadTimeout):
+        return AdapterTimeout(f"{what} 响应超时：{exc}")
+    return AdapterUncertain(f"{what} 请求结果不确定（可能已执行）：{exc}")
 
 
 class AdapterRemoteError(AdapterError):

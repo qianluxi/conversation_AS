@@ -61,7 +61,7 @@ def test_workbuddy_opencode_bidirectional(tmp_path: Path) -> None:
         stored_run = store.get_run(conversation.run_id)
         assert stored_run is not None
         assert stored_run.status is RunStatus.COMPLETED
-        assert stored_run.phase is RunPhase.APPROVED
+        assert stored_run.phase is RunPhase.COMPLETED
         assert stored_run.metadata["approved"] is True
         assert store.list_events(conversation.run_id)
         steps = store.list_steps(conversation.run_id)

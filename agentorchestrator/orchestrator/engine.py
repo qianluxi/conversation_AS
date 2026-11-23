@@ -5,11 +5,13 @@ from typing import Any
 from ..adapters.base import (
     AdapterError,
     AdapterTimeout,
+    AdapterUncertain,
     AgentAdapter,
     AgentReply,
     MessageRef,
 )
 from ..messaging.schema import (
+    TERMINAL_PHASES,
     Message,
     MessageStatus,
     Run,
@@ -66,18 +68,21 @@ class Conversation:
                   payload: dict[str, Any] | None = None) -> None:
         if self.run.phase is phase:
             return
-        self.store.update_run(self.run_id, phase=phase, current_turn=self.turn)
-        self._refresh()
-        self.event(event_type, payload=payload or {"phase": phase.value})
+        self.run = self.store.transition_run(
+            self.run_id, phase=phase, current_turn=self.turn,
+            event_type=event_type, payload=payload or {"phase": phase.value},
+        )
+        self.turn = self.run.current_turn
 
     def finish(self, status: RunStatus, phase: RunPhase,
                metadata: dict[str, Any] | None = None) -> None:
         merged = {**self.run.metadata, **(metadata or {})}
         merged.setdefault("finished_at", utc_now().isoformat())
-        self.store.update_run(self.run_id, status=status, phase=phase,
-                             current_turn=self.turn, metadata=merged)
-        self._refresh()
-        self.event(f"run_{status.value}", phase=phase, payload=metadata or {})
+        self.run = self.store.transition_run(
+            self.run_id, status=status, phase=phase, current_turn=self.turn,
+            metadata=merged, event_type=f"run_{status.value}", payload=metadata or {},
+        )
+        self.turn = self.run.current_turn
 
     # ---- agents -----------------------------------------------------------
 
@@ -148,6 +153,24 @@ class Conversation:
                               **reply.metadata},
                 )
 
+        self._refresh()
+        if self.run.status is not RunStatus.RUNNING or self.run.phase in TERMINAL_PHASES:
+            raise RuntimeError(
+                f"run {self.run_id} 已结束（status={self.run.status.value}, "
+                f"phase={self.run.phase.value}），不能继续发送消息。"
+            )
+        if adapter.kind == "workbuddy_local":
+            pending = self.store.list_unfinished(provider=adapter.kind)
+            if pending:
+                sample = ", ".join(
+                    f"{item.run_id}/{item.message_id}={item.status.value}"
+                    for item in pending[:3]
+                )
+                raise AdapterError(
+                    "WorkBuddy 本地助理存在未确认的远端任务，已禁止新消息："
+                    f"{sample}。请先运行 `resume` 核对，或 `release` 人工解除。"
+                )
+
         if phase is not None:
             self.set_phase(phase)
 
@@ -184,8 +207,8 @@ class Conversation:
             ref = await adapter.send_message(
                 binding.provider_session_id, outgoing.content, timeout=timeout,
             )
-        except AdapterTimeout as exc:
-            self._mark_unknown(outgoing, step, exc, phase="send_timeout")
+        except (AdapterTimeout, AdapterUncertain) as exc:
+            self._mark_unknown(outgoing, step, exc, phase="send_uncertain")
             raise
         except AdapterError as exc:
             self._mark_failed(outgoing, step, exc, phase="send_failed")
@@ -239,7 +262,6 @@ class Conversation:
 
     def _complete(self, outgoing: Message, reply: AgentReply, binding: SessionBinding,
                   step: Step | None) -> AgentReply:
-        self.store.update_message(outgoing.message_id, status=MessageStatus.COMPLETED)
         reply_message = Message(
             run_id=self.run_id, turn_id=outgoing.turn_id, from_agent=outgoing.to_agent,
             to_agent=outgoing.from_agent, content=reply.text,
@@ -249,20 +271,15 @@ class Conversation:
             reply_to=outgoing.message_id,
             metadata={"stop_reason": reply.stop_reason, "usage": reply.usage},
         )
-        self.store.save_message(reply_message)
-        if step is not None:
-            self.store.finish_step(step.step_id, StepState.COMPLETED,
-                                   output_message_id=reply_message.message_id)
-            self.event("step_completed", step_id=step.step_id, payload={
-                "message_id": outgoing.message_id,
-                "output_message_id": reply_message.message_id,
-            })
-        self.event("message_completed", step_id=step.step_id if step else None,
-                   payload={"message_id": outgoing.message_id,
-                            "reply_message_id": reply_message.message_id})
-
-        self.turn = max(self.turn, outgoing.turn_id + 1)
-        self.store.update_run(self.run_id, current_turn=self.turn)
+        next_turn = max(self.turn, outgoing.turn_id + 1)
+        self.store.complete_exchange(
+            outgoing_message_id=outgoing.message_id,
+            reply=reply_message,
+            step_id=step.step_id if step else None,
+            run_id=self.run_id,
+            current_turn=next_turn,
+        )
+        self.turn = next_turn
         self._refresh()
         return AgentReply(
             session_id=reply.session_id, text=reply.text,
@@ -289,6 +306,9 @@ class Conversation:
     async def resume(self, *, timeout: float | None = None,
                      allow_resend_unstarted: bool = False) -> list[dict[str, Any]]:
         """核对未完成消息的外部状态；默认绝不重发可能已执行的消息。"""
+        self._refresh()
+        if self.run.status is not RunStatus.RUNNING or self.run.phase in TERMINAL_PHASES:
+            return []
         unfinished = self.store.list_unfinished_messages(self.run_id)
         self._reconcile_steps()
         if not unfinished:
@@ -351,6 +371,58 @@ class Conversation:
     def transcript(self) -> list[Message]:
         return self.store.list_messages(self.run_id)
 
+    async def release(self, message_id: str, *, force: bool = False,
+                      timeout: float | None = None) -> Message:
+        """人工释放不确定消息：先尽力核对远端，force 时才放弃等待。"""
+        message = self.store.get_message(message_id)
+        if message is None:
+            raise KeyError(f"未知 message_id: {message_id}")
+        if message.reply_to is not None:
+            raise ValueError("回复消息不能被 release")
+        if self.store.find_reply(message_id) is not None:
+            raise RuntimeError("该消息已有回复，请使用 resume 完成收尾")
+        if message.status in (MessageStatus.COMPLETED, MessageStatus.CANCELLED):
+            return message
+
+        adapter = self.adapters.get(message.to_agent)
+        binding = self.store.get_binding(self.run_id, message.to_agent)
+        if not force:
+            if adapter is not None and binding is not None and message.provider_message_id:
+                ref = MessageRef(
+                    session_id=binding.provider_session_id,
+                    message_id=message.provider_message_id,
+                    metadata=(message.metadata or {}).get("ref") or {},
+                )
+                reply = await adapter.recover_reply(binding.provider_session_id, ref)
+                if reply is not None:
+                    step_id = (message.metadata or {}).get("step_id")
+                    step = self.store.get_step(step_id) if step_id else None
+                    self._complete(message, reply, binding, step)
+                    completed = self.store.get_message(message_id)
+                    assert completed is not None
+                    return completed
+            raise AdapterError(
+                "无法确认远端任务是否结束。请先在外部系统确认，"
+                "确需放弃时使用 --force 释放（可能丢失上一轮回复）。"
+            )
+
+        if adapter is not None:
+            release_quarantine = getattr(adapter, "release_quarantine", None)
+            if release_quarantine is not None:
+                await release_quarantine(force=True,
+                                         message_id=message.provider_message_id)
+            elif binding is not None:
+                try:
+                    await adapter.remote_abort(binding.provider_session_id)
+                except AdapterError:
+                    await adapter.cancel_wait(binding.provider_session_id)
+        released = self.store.release_message(
+            message_id, reason="manual force release（已放弃等待远端结果）",
+        )
+        self.event("run_released", step_id=(message.metadata or {}).get("step_id"),
+                   payload={"message_id": message_id})
+        return released
+
     def _reconcile_steps(self) -> None:
         """修复崩溃窗口：消息已完成/失败，但 step 仍停留在 running。"""
         messages = self.store.list_messages(self.run_id)
@@ -369,9 +441,17 @@ class Conversation:
             message = related[-1]
             if message.status is MessageStatus.COMPLETED:
                 reply = self.store.find_reply(message.message_id)
+                if reply is None:
+                    self.store.finish_step(
+                        step.step_id, StepState.FAILED,
+                        error="reply_missing：消息标记完成但回复不存在（历史不一致）",
+                    )
+                    self.event("step_reconciled", step_id=step.step_id,
+                               payload={"state": "failed", "reason": "reply_missing"})
+                    continue
                 self.store.finish_step(
                     step.step_id, StepState.COMPLETED,
-                    output_message_id=reply.message_id if reply else None,
+                    output_message_id=reply.message_id,
                 )
                 self.event("step_reconciled", step_id=step.step_id,
                            payload={"state": "completed"})
@@ -458,8 +538,9 @@ async def run_collaboration(conversation: Conversation, *,
             })
 
             if review.decision == "approved":
+                conversation.set_phase(RunPhase.APPROVED)
                 conversation.finish(
-                    RunStatus.COMPLETED, RunPhase.APPROVED,
+                    RunStatus.COMPLETED, RunPhase.COMPLETED,
                     {**metadata, "approved": True, "rounds": rounds,
                      "review": review.model_dump(mode="json")},
                 )

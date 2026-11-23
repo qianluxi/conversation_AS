@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 from ..config import (
     AgentSettings,
     AppConfig,
@@ -15,6 +13,7 @@ from .base import (
     AdapterError,
     AdapterRemoteError,
     AdapterTimeout,
+    AdapterUncertain,
     AgentAdapter,
     AgentReply,
     HealthStatus,
@@ -23,19 +22,21 @@ from .base import (
 from .mock import MockAdapter
 from .opencode import OpenCodeAdapter
 from .workbuddy_acp import WorkBuddyAcpAdapter
-from .workbuddy_local import WorkBuddyLocalAdapter
+from .workbuddy_local import LocalAssistantGate, WorkBuddyLocalAdapter
 
 __all__ = [
     "AdapterAuthError",
     "AdapterError",
     "AdapterRemoteError",
     "AdapterTimeout",
+    "AdapterUncertain",
     "AgentAdapter",
     "AgentReply",
     "HealthStatus",
     "MessageRef",
     "OpenCodeAdapter",
     "WorkBuddyLocalAdapter",
+    "LocalAssistantGate",
     "WorkBuddyAcpAdapter",
     "MockAdapter",
     "build_adapter",
@@ -45,11 +46,11 @@ __all__ = [
 
 def build_adapter(name: str, settings: AgentSettings,
                   *,
-                  local_lock: asyncio.Lock | None = None) -> AgentAdapter:
+                  local_gate: LocalAssistantGate | None = None) -> AgentAdapter:
     if isinstance(settings, OpencodeSettings):
         return OpenCodeAdapter(name, settings)
     if isinstance(settings, WorkBuddyLocalSettings):
-        return WorkBuddyLocalAdapter(name, settings, lock=local_lock)
+        return WorkBuddyLocalAdapter(name, settings, gate=local_gate)
     if isinstance(settings, WorkBuddyAcpSettings):
         return WorkBuddyAcpAdapter(name, settings)
     if isinstance(settings, MockSettings):
@@ -58,12 +59,12 @@ def build_adapter(name: str, settings: AgentSettings,
 
 
 def build_adapters(config: AppConfig) -> dict[str, AgentAdapter]:
-    # 同一 PC 本地助理（相同 base_url）的所有实例共享一把锁，避免跨任务串扰。
-    local_locks: dict[str, asyncio.Lock] = {}
+    # 同一 PC 本地助理（相同 base_url）的所有实例共享同一个远端状态门。
+    local_gates: dict[str, LocalAssistantGate] = {}
     adapters: dict[str, AgentAdapter] = {}
     for name, settings in config.agents.items():
-        lock = None
+        gate = None
         if isinstance(settings, WorkBuddyLocalSettings):
-            lock = local_locks.setdefault(settings.base_url, asyncio.Lock())
-        adapters[name] = build_adapter(name, settings, local_lock=lock)
+            gate = local_gates.setdefault(settings.base_url, LocalAssistantGate())
+        adapters[name] = build_adapter(name, settings, local_gate=gate)
     return adapters

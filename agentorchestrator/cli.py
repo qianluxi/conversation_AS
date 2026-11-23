@@ -160,6 +160,31 @@ async def _cmd_resume(_config: AppConfig, adapters: dict[str, AgentAdapter],
         await conversation.close()
 
 
+async def _cmd_release(_config: AppConfig, adapters: dict[str, AgentAdapter],
+                       store: Store, args: argparse.Namespace) -> int:
+    conversation = Conversation(store, adapters, run_id=args.run_id)
+    try:
+        message = await conversation.release(args.message_id, force=args.force,
+                                             timeout=args.timeout)
+        print(f"{message.message_id} -> {message.status.value}")
+        print("已解除占用。注意：--force 释放不会撤销远端可能仍在执行的代码修改。")
+        return 0
+    finally:
+        await conversation.close()
+
+
+async def _cmd_pending(_config: AppConfig, store: Store, args: argparse.Namespace) -> int:
+    items = store.list_unfinished(provider=args.provider)
+    if not items:
+        print("没有未完成消息。")
+        return 0
+    for message in items:
+        print(f"{message.run_id}  {message.message_id}  {message.to_agent:<14} "
+              f"{message.status.value:<13} turn={message.turn_id}  "
+              f"{message.created_at.isoformat()}")
+    return 0
+
+
 async def _cmd_events(_config: AppConfig, store: Store, args: argparse.Namespace) -> int:
     run = store.get_run(args.run_id)
     if run is None:
@@ -268,7 +293,7 @@ def _build_parser() -> argparse.ArgumentParser:
     send.add_argument("--to", default="orchestrator")
     send.add_argument("--timeout", type=float, default=None)
 
-    chat = sub.add_parser("chat", help="交互式双向对话（阶段一）")
+    chat = sub.add_parser("chat", help="交互式双向对话")
     chat.add_argument("--agent", default=None)
     chat.add_argument("--goal", default="手动双向通信")
     chat.add_argument("--timeout", type=float, default=None)
@@ -297,6 +322,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     events = sub.add_parser("events", help="查看 run 的状态机事件与节点记录")
     events.add_argument("--run-id", required=True)
+
+    release = sub.add_parser("release", help="人工释放不确定消息（默认先核对远端）")
+    release.add_argument("--run-id", required=True)
+    release.add_argument("--message-id", required=True)
+    release.add_argument("--force", action="store_true",
+                         help="确认远端已结束/愿意放弃时强制释放")
+    release.add_argument("--timeout", type=float, default=None)
+
+    pending = sub.add_parser("pending", help="列出所有未完成/可能占用远端的消息")
+    pending.add_argument("--provider", default=None,
+                         help="按 provider 过滤，例如 workbuddy_local")
 
     auth = sub.add_parser("auth", help="WorkBuddy OAuth 授权")
     auth.add_argument("--agent", default=None)
@@ -349,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_cmd_resume(config, adapters, store, args))
         if args.command == "events":
             return asyncio.run(_cmd_events(config, store, args))
+        if args.command == "release":
+            return asyncio.run(_cmd_release(config, adapters, store, args))
+        if args.command == "pending":
+            return asyncio.run(_cmd_pending(config, store, args))
         if args.command == "auth":
             return asyncio.run(_cmd_auth(config, args))
     except KeyError as exc:

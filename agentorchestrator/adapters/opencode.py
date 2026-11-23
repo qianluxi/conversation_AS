@@ -15,10 +15,12 @@ from .base import (
     AdapterError,
     AdapterRemoteError,
     AdapterTimeout,
+    AdapterUncertain,
     AgentAdapter,
     AgentReply,
     HealthStatus,
     MessageRef,
+    translate_transport_error,
 )
 
 
@@ -68,20 +70,23 @@ class OpenCodeAdapter(AgentAdapter):
             response = await self._client.request(
                 method, f"{self._base}{path}", timeout=limit, **kwargs
             )
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise AdapterError(
                 f"无法连接 OpenCode（{self._base}）。请确认已运行 "
                 f"`opencode serve --hostname 127.0.0.1 --port 4096`。原始错误：{exc}"
             ) from exc
-        except httpx.ReadTimeout as exc:
-            raise AdapterTimeout(f"OpenCode 响应超时（{limit.read}s）") from exc
         except httpx.HTTPError as exc:
-            raise AdapterError(f"请求 OpenCode 失败：{exc}") from exc
+            raise translate_transport_error(exc, what="OpenCode") from exc
 
         if response.status_code in (401, 403):
             raise AdapterAuthError(
                 "OpenCode 鉴权失败。请把 OPENCODE_SERVER_PASSWORD 写入配置，"
                 "并保持 username=opencode（Basic Auth）。"
+            )
+        if response.status_code >= 500:
+            raise AdapterUncertain(
+                f"OpenCode 返回 {response.status_code}（请求结果不确定）：{response.text[:300]}",
+                status_code=response.status_code,
             )
         if response.status_code >= 400:
             raise AdapterRemoteError(
@@ -378,7 +383,10 @@ class OpenCodeAdapter(AgentAdapter):
             ]
             if not candidates:
                 return None
-            chosen = max(candidates, key=lambda item: float((item.get("time") or {}).get("created") or 0))
+            if len(candidates) != 1:
+                # 无法唯一关联到本次请求：保留 UNKNOWN，交给人工核对
+                return None
+            chosen = candidates[0]
             finished = bool((chosen.get("time") or {}).get("completed")) or bool(chosen.get("finish"))
             if not finished:
                 return None

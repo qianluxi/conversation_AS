@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from ..messaging.schema import (
+    ALLOWED_PHASE_TRANSITIONS,
+    TERMINAL_STATUSES,
+    InvalidTransition,
     Message,
     MessageStatus,
     Run,
@@ -216,6 +219,83 @@ class Store:
                 (*values.values(), run_id),
             )
 
+    def transition_run(self, run_id: str, *, status: RunStatus | None = None,
+                       phase: RunPhase | None = None,
+                       current_turn: int | None = None,
+                       metadata: dict[str, Any] | None = None,
+                       event_type: str | None = None,
+                       step_id: str | None = None,
+                       payload: dict[str, Any] | None = None,
+                       validate: bool = True) -> Run:
+        """原子地更新 run 状态并写入审计事件，同时校验迁移合法性。"""
+        with self._lock, self._conn:
+            row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"未知 run_id: {run_id}")
+            current_status = RunStatus(row["status"])
+            current_phase = RunPhase(row["phase"] or RunPhase.CREATED.value)
+
+            if validate:
+                if current_status in TERMINAL_STATUSES:
+                    raise InvalidTransition(
+                        f"run 已处于终态 {current_status.value}，不允许继续迁移"
+                    )
+                if phase is not None and phase is not current_phase:
+                    allowed = ALLOWED_PHASE_TRANSITIONS.get(current_phase, frozenset())
+                    if phase not in allowed:
+                        raise InvalidTransition(
+                            f"非法迁移：{current_phase.value} -> {phase.value}"
+                        )
+                if status is not None and status is not current_status:
+                    if current_status is not RunStatus.RUNNING:
+                        raise InvalidTransition(
+                            f"非法状态：{current_status.value} -> {status.value}"
+                        )
+                    if status not in (RunStatus.COMPLETED, RunStatus.FAILED,
+                                      RunStatus.CANCELLED):
+                        raise InvalidTransition(
+                            f"非法状态：{current_status.value} -> {status.value}"
+                        )
+
+            values: dict[str, Any] = {"updated_at": _iso(utc_now())}
+            if status is not None:
+                values["status"] = status.value
+            if phase is not None:
+                values["phase"] = phase.value
+            if current_turn is not None:
+                values["current_turn"] = current_turn
+            if metadata is not None:
+                values["metadata"] = _dump(metadata)
+            assignments = ", ".join(f"{key} = ?" for key in values)
+            self._conn.execute(
+                f"UPDATE runs SET {assignments} WHERE run_id = ?",
+                (*values.values(), run_id),
+            )
+            if event_type:
+                target_phase = phase or current_phase
+                self._append_event_tx(run_id, event_type, target_phase, step_id, payload or {})
+        updated = self.get_run(run_id)
+        assert updated is not None
+        return updated
+
+    def _append_event_tx(self, run_id: str, event_type: str, phase: RunPhase,
+                         step_id: str | None = None,
+                         payload: dict[str, Any] | None = None) -> RunEvent:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = ?", (run_id,),
+        ).fetchone()
+        event = RunEvent(
+            run_id=run_id, seq=int(row[0]) + 1, event_type=event_type,
+            phase=phase, step_id=step_id, payload=payload or {},
+        )
+        self._conn.execute(
+            "INSERT INTO run_events (event_id, run_id, seq, event_type, phase, step_id,"
+            " created_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (event.event_id, event.run_id, event.seq, event.event_type, event.phase.value,
+             event.step_id, _iso(event.created_at), _dump(event.payload)),
+        )
+        return event
+
     def list_runs(self, limit: int = 20, *, status: RunStatus | None = None) -> list[Run]:
         query = "SELECT * FROM runs"
         params: list[Any] = []
@@ -334,6 +414,110 @@ class Store:
             ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
+    def list_unfinished(self, *, provider: str | None = None) -> list[Message]:
+        """列出所有 run 中未完成、且可能仍占用远端资源的消息。"""
+        placeholders = ",".join("?" for _ in UNFINISHED_STATUSES)
+        params: list[Any] = [status.value for status in UNFINISHED_STATUSES]
+        query = (
+            "SELECT m.* FROM messages m"
+            f" WHERE m.status IN ({placeholders})"
+            " AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.message_id)"
+        )
+        if provider:
+            query += " AND m.provider = ?"
+            params.append(provider)
+        query += " ORDER BY m.created_at"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
+    def complete_exchange(self, *, outgoing_message_id: str, reply: Message,
+                          step_id: str | None, run_id: str,
+                          current_turn: int) -> None:
+        """原子完成：写入回复、标记原消息、收尾 step、更新 run、写事件。"""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE message_id = ?", (outgoing_message_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"未知 message_id: {outgoing_message_id}")
+            existing = self._conn.execute(
+                "SELECT 1 FROM messages WHERE reply_to = ?", (outgoing_message_id,),
+            ).fetchone()
+            if existing is not None:
+                raise RuntimeError("该消息已有回复，拒绝重复完成（避免覆盖恢复结果）")
+
+            self._insert_message_tx(reply)
+            now = _iso(utc_now())
+            self._conn.execute(
+                "UPDATE messages SET status = ?, updated_at = ? WHERE message_id = ?",
+                (MessageStatus.COMPLETED.value, now, outgoing_message_id),
+            )
+            if step_id:
+                self._conn.execute(
+                    "UPDATE steps SET state = ?, finished_at = ?, error = NULL,"
+                    " output_message_id = ? WHERE step_id = ?",
+                    (StepState.COMPLETED.value, now, reply.message_id, step_id),
+                )
+            run_row = self._conn.execute(
+                "SELECT phase FROM runs WHERE run_id = ?", (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise KeyError(f"未知 run_id: {run_id}")
+            self._conn.execute(
+                "UPDATE runs SET current_turn = ?, updated_at = ? WHERE run_id = ?",
+                (current_turn, now, run_id),
+            )
+            phase = RunPhase(run_row["phase"])
+            payload = {"message_id": outgoing_message_id,
+                       "reply_message_id": reply.message_id}
+            self._append_event_tx(run_id, "message_completed", phase, step_id, payload)
+            if step_id:
+                self._append_event_tx(run_id, "step_completed", phase, step_id, payload)
+
+    def release_message(self, message_id: str, *, reason: str) -> Message:
+        """人工解除一条不确定消息：标记 CANCELLED、收尾 step、写审计事件。"""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE message_id = ?", (message_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"未知 message_id: {message_id}")
+            metadata = json.loads(row["metadata"])
+            step_id = metadata.get("step_id")
+            now = _iso(utc_now())
+            self._conn.execute(
+                "UPDATE messages SET status = ?, error = ?, updated_at = ? WHERE message_id = ?",
+                (MessageStatus.CANCELLED.value, reason, now, message_id),
+            )
+            if step_id:
+                self._conn.execute(
+                    "UPDATE steps SET state = ?, finished_at = ?, error = ? WHERE step_id = ?",
+                    (StepState.FAILED.value, now, reason, step_id),
+                )
+            run_row = self._conn.execute(
+                "SELECT phase FROM runs WHERE run_id = ?", (row["run_id"],),
+            ).fetchone()
+            phase = RunPhase(run_row["phase"]) if run_row else RunPhase.CREATED
+            self._append_event_tx(row["run_id"], "message_released", phase, step_id,
+                                  {"message_id": message_id, "reason": reason})
+        released = self.get_message(message_id)
+        assert released is not None
+        return released
+
+    def _insert_message_tx(self, message: Message) -> None:
+        self._conn.execute(
+            "INSERT INTO messages (message_id, run_id, turn_id, from_agent, to_agent, content,"
+            " status, provider, provider_session_id, provider_message_id, reply_to, dedupe_key,"
+            " attempt, error, created_at, updated_at, last_attempt_at, metadata)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (message.message_id, message.run_id, message.turn_id, message.from_agent,
+             message.to_agent, message.content, message.status.value, message.provider,
+             message.provider_session_id, message.provider_message_id, message.reply_to,
+             message.dedupe_key, message.attempt, message.error, _iso(message.created_at),
+             _iso(message.updated_at), _iso(message.last_attempt_at), _dump(message.metadata)),
+        )
+
     # ---- steps ------------------------------------------------------------
 
     def create_step(self, step: Step) -> Step:
@@ -393,20 +577,7 @@ class Store:
                      step_id: str | None = None,
                      payload: dict[str, Any] | None = None) -> RunEvent:
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id = ?", (run_id,),
-            ).fetchone()
-            event = RunEvent(
-                run_id=run_id, seq=int(row[0]) + 1, event_type=event_type,
-                phase=phase, step_id=step_id, payload=payload or {},
-            )
-            self._conn.execute(
-                "INSERT INTO run_events (event_id, run_id, seq, event_type, phase, step_id,"
-                " created_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (event.event_id, event.run_id, event.seq, event.event_type, event.phase.value,
-                 event.step_id, _iso(event.created_at), _dump(event.payload)),
-            )
-        return event
+            return self._append_event_tx(run_id, event_type, phase, step_id, payload or {})
 
     def list_events(self, run_id: str, limit: int = 500) -> list[RunEvent]:
         with self._lock:
