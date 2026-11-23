@@ -3,6 +3,9 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
+项目名 `agentorchestrator`，当前版本 `0.5.0`，要求 Python `>=3.11`
+（与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
+
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
 > OAuth、命令、故障处理手册）。
 
@@ -20,6 +23,9 @@ Orchestrator（本仓库）
 
 ## 快速开始（离线，不需要任何凭据）
 
+核心依赖（`httpx` / `pydantic` / `PyYAML`）随 `pip install -e .` 安装；
+测试依赖 `pytest` 属于 `.[dev]`，图形界面依赖 FastAPI/uvicorn 属于 `.[web]`。
+
 ```powershell
 python -m pip install -e .
 python -m agentorchestrator demo
@@ -27,7 +33,32 @@ python -m agentorchestrator transcript --run-id <run_id>
 python -m agentorchestrator events --run-id <run_id>
 ```
 
-## 核心可靠性设计（v0.4）
+安装后也可用等价的控制台入口 `agentorchestrator`（`pyproject.toml` 的
+`[project.scripts]`）替代 `python -m agentorchestrator`。
+
+## 图形界面（推荐给普通用户）
+
+界面依赖是可选的 `web` extra（FastAPI + uvicorn）；未安装时 `ui` 会提示安装命令。
+
+```powershell
+python -m pip install -e ".[web]"
+python -m agentorchestrator ui
+```
+
+默认自动打开 `http://127.0.0.1:8765/`，包含：
+
+- 一键检查各 agent 连接状态；
+- 填写目标任务，选择 Planner / Worker / Reviewer，点击「开始协作」；
+- 实时查看运行状态、步骤耗时、消息全文、状态机事件；
+- 结构化审查结果（结论、findings、evidence、confidence）；
+- 待处理/隔离消息的「核对恢复」与「强制释放」；
+- 历史运行列表，点击回看。
+
+界面只监听 `127.0.0.1`，默认不对外暴露。常用参数：
+`--host 127.0.0.1`、`--port 8765`、`--no-browser`。详细说明见
+[docs/USER_GUIDE.md 第 6.1 节](docs/USER_GUIDE.md#61-图形界面推荐)。
+
+## 核心可靠性设计（v0.5）
 
 ### 1. 结构化审查（无关键字放行）
 
@@ -248,6 +279,7 @@ python -m agentorchestrator release --run-id <id> --message-id <id> [--force]
 ```
 agentorchestrator/
 ├── adapters/            # base / opencode / workbuddy_local / workbuddy_acp / workbuddy_ipc / mock
+├── api/                 # FastAPI + 单页 Web UI（server.py / static/index.html）
 ├── messaging/schema.py  # Message / Run / Step / RunEvent / 迁移表
 ├── storage/database.py  # SQLite（WAL、迁移兼容、事务化完成）
 ├── orchestrator/engine.py
@@ -258,7 +290,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 57 项：单元 + fake server + 故障注入
+tests/                   # 58 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 测试
@@ -276,5 +308,4 @@ OpenCode v2 多候选恢复等。
 
 1. 工作流 YAML 化与工作流级断点续跑（当前只恢复消息）。
 2. 跨进程互斥（文件锁）与持久化任务队列。
-3. FastAPI 管理接口 + Web 界面（`web` extra）。
-4. 角色与品牌解耦、第三/第四个智能体、并行执行（代码写入保持单写者）。
+3. 角色与品牌解耦、第三/第四个智能体、并行执行（代码写入保持单写者）。

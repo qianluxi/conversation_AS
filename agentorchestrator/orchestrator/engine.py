@@ -498,10 +498,12 @@ async def run_collaboration(conversation: Conversation, *,
             conversation.set_phase(RunPhase.EXECUTING)
             work_reply = await conversation.ask(
                 worker,
-                "你是代码执行者。请依据任务方案检查本地项目并按需修改。\n"
+                "你是任务执行者。请严格依据任务方案完成工作。\n"
+                "只有当方案明确要求检查或修改本地代码时才使用工具；"
+                "否则直接给出结果，不要额外检查项目。\n"
                 f"【任务方案】\n{plan}\n"
                 f"【上一轮审查意见】\n{issues or '无'}\n"
-                "要求：说明检查了什么、发现或修改了什么；不要改动任务范围之外的文件。",
+                "要求：说明你做了什么；不要改动任务范围之外的文件。",
                 turn_id=round_no, timeout=timeout,
                 dedupe_key=f"{conversation.run_id}:{round_no}:{worker}",
                 role="worker", phase=RunPhase.EXECUTING,

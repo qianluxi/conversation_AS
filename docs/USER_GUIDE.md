@@ -45,11 +45,11 @@ opencode --version
 
 ```powershell
 cd F:\PyProjects\conversation_AS
-python -m pip install -e .
-python -m pytest -q          # 离线测试，不需要任何凭据
+python -m pip install -e ".[dev]"   # 含 pytest；只运行程序可去掉 [dev]
+python -m pytest -q                 # 离线测试，不需要任何凭据
 ```
 
-看到全部测试通过即可继续。
+看到全部测试通过即可继续。图形界面另需可选依赖 `web`（见 6.1 节）。
 
 ---
 
@@ -220,6 +220,28 @@ python -m agentorchestrator --config config.yaml send --agent workbuddy_acp --te
 
 ## 6. 命令速查
 
+### 6.1 图形界面（推荐）
+
+界面依赖是可选的 `web` extra（FastAPI + uvicorn）；未安装时 `ui` 会提示安装命令。
+
+```powershell
+python -m pip install -e ".[web]"
+python -m agentorchestrator --config config.yaml ui
+```
+
+默认自动打开 `http://127.0.0.1:8765/`。界面内可以：
+
+- 检查 agent 连接；
+- 填写任务目标，选择 Planner / Worker / Reviewer、最大轮数与超时并启动协作；
+- 实时查看运行状态、步骤耗时、消息全文、状态机事件和结构化审查结果；
+- 在「待处理 / 隔离消息」中执行核对恢复或强制释放；
+- 从历史运行列表点击回看。
+
+只监听 `127.0.0.1`；不要改成 `0.0.0.0` 暴露到局域网。可选参数：
+`--host 127.0.0.1`、`--port 8765`、`--no-browser`（不自动打开浏览器）。
+
+### 6.2 命令行
+
 ```powershell
 python -m agentorchestrator --config config.yaml agents
 python -m agentorchestrator --config config.yaml health
@@ -231,6 +253,7 @@ python -m agentorchestrator --config config.yaml events     --run-id <id>
 python -m agentorchestrator --config config.yaml pending    [--provider workbuddy_local]
 python -m agentorchestrator --config config.yaml resume     --run-id <id> [--resend-unstarted]
 python -m agentorchestrator --config config.yaml release    --run-id <id> --message-id <id> [--force]
+python -m agentorchestrator --config config.yaml ui         [--host 127.0.0.1] [--port 8765] [--no-browser]
 python -m agentorchestrator demo
 ```
 

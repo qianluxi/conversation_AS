@@ -6,6 +6,8 @@ import json
 import logging
 import secrets
 import sys
+import threading
+import webbrowser
 
 from .adapters import AgentAdapter, build_adapters
 from .adapters.base import AdapterError, HealthStatus
@@ -185,6 +187,27 @@ async def _cmd_pending(_config: AppConfig, store: Store, args: argparse.Namespac
     return 0
 
 
+def _cmd_ui(config: AppConfig, store: Store, args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+        from .api.server import create_app
+    except ImportError:
+        print(
+            "缺少 Web 依赖。请运行：python -m pip install -e \".[web]\" 或 "
+            "python -m pip install fastapi uvicorn",
+            file=sys.stderr,
+        )
+        return 2
+    app = create_app(config, store)
+    url = f"http://{args.host}:{args.port}/"
+    print(f"图形界面：{url}")
+    print("按 Ctrl+C 停止。")
+    if not args.no_browser:
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 async def _cmd_events(_config: AppConfig, store: Store, args: argparse.Namespace) -> int:
     run = store.get_run(args.run_id)
     if run is None:
@@ -334,6 +357,11 @@ def _build_parser() -> argparse.ArgumentParser:
     pending.add_argument("--provider", default=None,
                          help="按 provider 过滤，例如 workbuddy_local")
 
+    ui = sub.add_parser("ui", help="启动本地图形界面（推荐给普通用户）")
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+
     auth = sub.add_parser("auth", help="WorkBuddy OAuth 授权")
     auth.add_argument("--agent", default=None)
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
@@ -358,6 +386,23 @@ def main(argv: list[str] | None = None) -> int:
         store = Store(config.storage.path)
         try:
             return asyncio.run(_cmd_transcript(store, args))
+        finally:
+            store.close()
+
+    if args.command == "ui":
+        try:
+            config = load_config(args.config)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"配置错误：{exc}", file=sys.stderr)
+            return 2
+        logging.basicConfig(
+            level=getattr(logging, (args.log_level or config.log_level).upper(), logging.INFO),
+            format="%(levelname)s %(name)s: %(message)s",
+        )
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        store = Store(config.storage.path)
+        try:
+            return _cmd_ui(config, store, args)
         finally:
             store.close()
 

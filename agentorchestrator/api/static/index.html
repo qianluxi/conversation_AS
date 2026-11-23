@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy × OpenCode 协作台</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2b;
+    --panel-2: #0f1727;
+    --border: #22304a;
+    --text: #dbe6f6;
+    --muted: #8fa3c0;
+    --accent: #4da3ff;
+    --ok: #35c98a;
+    --warn: #f0b24a;
+    --bad: #ef6461;
+    --info: #8b9cc0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #101c31, #0b1220);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .server-status { color: var(--ok); font-size: 12px; }
+  main {
+    display: grid; grid-template-columns: 420px minmax(0, 1fr);
+    gap: 16px; padding: 16px 22px 40px; align-items: start; max-width: 1600px; margin: 0 auto;
+  }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  textarea, input, select, button {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  }
+  textarea { width: 100%; min-height: 76px; resize: vertical; }
+  input[type=number] { width: 100%; }
+  select { width: 100%; }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 10px; margin-top: 10px; align-items: end; }
+  button {
+    cursor: pointer; background: #1b3a63; border-color: #2f5d94;
+    transition: filter .15s, opacity .15s; white-space: nowrap;
+  }
+  button:hover { filter: brightness(1.15); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.secondary { background: var(--panel-2); border-color: var(--border); }
+  button.danger { background: #4a1f22; border-color: #7a3235; }
+  .primary { background: linear-gradient(180deg, #2e7bff, #1b5ed1); border-color: #2a6fe0; font-weight: 600; }
+  .agent-grid { display: grid; gap: 8px; margin-top: 12px; }
+  .agent {
+    display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+    padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel-2); font-size: 12px;
+  }
+  .agent strong { font-size: 13px; }
+  .agent small { grid-column: 1 / -1; color: var(--muted); word-break: break-all; }
+  .agent.ok { border-color: #1e5c43; }
+  .agent.bad { border-color: #6b2c2e; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--bad); }
+  .run-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px;
+    border: 1px solid var(--border); background: #16233a; color: var(--muted); text-transform: lowercase;
+  }
+  .b-completed, .b-approved { color: var(--ok); border-color: #1e5c43; }
+  .b-failed, .b-blocked { color: var(--bad); border-color: #6b2c2e; }
+  .b-unknown, .b-quarantined, .b-revision_required, .b-recovering { color: var(--warn); border-color: #6b5426; }
+  .b-running, .b-created, .b-sent, .b-acknowledged, .b-sending { color: var(--accent); border-color: #234d79; }
+  .review { margin: 14px 0; padding: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2); }
+  .review.approved { border-color: #1e5c43; }
+  .review.failed { border-color: #6b2c2e; }
+  .review h3 { margin: 0 0 6px; font-size: 13px; }
+  .review ul { margin: 8px 0 0; padding-left: 20px; }
+  .review li { margin: 4px 0; }
+  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin: 6px 0 12px; }
+  .tab { background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 7px 10px; color: var(--muted); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .hidden { display: none; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #1b2740; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  .msg { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--panel-2); }
+  .msg summary { cursor: pointer; padding: 8px 10px; font-size: 12px; }
+  .msg pre { margin: 0; padding: 10px 12px; border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; font: 12px/1.55 Consolas, "Microsoft YaHei", monospace; color: #c9d8ee; max-height: 380px; overflow: auto; }
+  .pending-item { border: 1px solid var(--border); border-radius: 9px; padding: 10px; margin-bottom: 8px; background: var(--panel-2); }
+  .pending-item .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .pending-item .preview { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-word; }
+  .history-item { padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 7px; cursor: pointer; background: var(--panel-2); }
+  .history-item:hover { border-color: #33507a; }
+  .history-item .goal { font-size: 12px; color: #c7d5e8; word-break: break-word; }
+  .history-item .meta { font-size: 11px; color: var(--muted); margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .error { color: var(--bad); font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
+  .empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+  @media (max-width: 980px) {
+    main { grid-template-columns: 1fr; }
+    .row, .row-2 { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>WorkBuddy × OpenCode 协作台</h1>
+  <span class="server-status">● 本地服务运行中</span>
+</header>
+<main>
+  <div class="col">
+    <section class="panel">
+      <h2>开始协作</h2>
+      <label for="goal">任务目标</label>
+      <textarea id="goal" placeholder="例如：检查特征工程模块是否存在数据泄漏，并给出修改建议。"></textarea>
+      <div class="row">
+        <div><label>Planner</label><select id="planner"></select></div>
+        <div><label>Worker</label><select id="worker"></select></div>
+        <div><label>Reviewer</label><select id="reviewer"></select></div>
+      </div>
+      <div class="row-2">
+        <div><label>最大轮数</label><input id="maxRounds" type="number" value="2" min="1" max="10"></div>
+        <div><label>超时（秒）</label><input id="timeout" type="number" value="300" min="10"></div>
+        <button id="healthBtn" class="secondary">检查连接</button>
+        <button id="startBtn" class="primary">开始协作</button>
+      </div>
+      <div id="agentStatus" class="agent-grid"></div>
+      <div id="startError" class="error"></div>
+    </section>
+
+    <section class="panel">
+      <h2>待处理 / 隔离消息</h2>
+      <div id="pendingList" class="empty">加载中…</div>
+    </section>
+
+    <section class="panel">
+      <h2>历史运行</h2>
+      <div id="history" class="empty">加载中…</div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel">
+      <div class="run-head">
+        <h2 style="margin:0">运行详情</h2>
+        <div id="runMeta" class="muted">尚未运行</div>
+      </div>
+      <div id="review"></div>
+      <div class="tabs">
+        <button class="tab active" data-tab="steps">步骤</button>
+        <button class="tab" data-tab="messages">消息</button>
+        <button class="tab" data-tab="events">事件</button>
+      </div>
+      <div id="tab-steps" class="tab-body"><div class="empty">开始一次协作后，这里会显示执行步骤。</div></div>
+      <div id="tab-messages" class="tab-body hidden"></div>
+      <div id="tab-events" class="tab-body hidden"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentRun = null;
+let pollTimer = null;
+let running = false;
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; }
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function fmtTime(value) {
+  if (!value) return "-";
+  try { return new Date(value).toLocaleTimeString("zh-CN", { hour12: false }); }
+  catch { return value; }
+}
+
+function duration(start, end) {
+  if (!start) return "-";
+  const a = new Date(start).getTime();
+  const b = end ? new Date(end).getTime() : Date.now();
+  if (Number.isNaN(a) || Number.isNaN(b)) return "-";
+  const s = Math.max(0, (b - a) / 1000);
+  return s < 60 ? `${s.toFixed(1)}s` : `${(s / 60).toFixed(1)}m`;
+}
+
+function badge(value, cls) {
+  return `<span class="badge ${cls || "b-" + value}">${esc(value)}</span>`;
+}
+
+function setError(text) { $("startError").textContent = text || ""; }
+
+async function loadAgents() {
+  const agents = await api("/api/agents");
+  const options = agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)} · ${esc(a.type)}</option>`).join("");
+  for (const id of ["planner", "worker"]) $(id).innerHTML = options;
+  $("reviewer").innerHTML = `<option value="">（同 Planner）</option>` + options;
+  const names = agents.map(a => a.name);
+  if (names.includes("workbuddy")) $("planner").value = "workbuddy";
+  else if (names.length) $("planner").value = names[0];
+  if (names.includes("opencode")) $("worker").value = "opencode";
+  else if (names.length > 1) $("worker").value = names[1];
+}
+
+async function checkHealth() {
+  const button = $("healthBtn");
+  button.disabled = true;
+  button.textContent = "检查中…";
+  try {
+    const results = await api("/api/health");
+    $("agentStatus").innerHTML = results.map(item => `
+      <div class="agent ${item.ok ? "ok" : "bad"}">
+        <strong><span class="dot ${item.ok ? "ok" : "bad"}"></span>${esc(item.name)}</strong>
+        <span class="muted">${esc(item.type)}</span>
+        <small>${esc(item.detail || "")}</small>
+      </div>`).join("");
+  } catch (error) {
+    $("agentStatus").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "检查连接";
+  }
+}
+
+async function startRun() {
+  if (running) return;
+  const goal = $("goal").value.trim();
+  if (!goal) { setError("请先填写任务目标。"); return; }
+  setError("");
+  const button = $("startBtn");
+  button.disabled = true;
+  button.textContent = "启动中…";
+  try {
+    const payload = {
+      goal,
+      planner: $("planner").value,
+      worker: $("worker").value,
+      reviewer: $("reviewer").value || null,
+      max_rounds: Number($("maxRounds").value) || 2,
+      timeout: Number($("timeout").value) || 300,
+    };
+    const result = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
+    currentRun = result.run_id;
+    running = true;
+    button.textContent = "运行中…";
+    renderRun({ run: { run_id: result.run_id, goal, status: "running", phase: "created" },
+                steps: [], messages: [], events: [], active: true });
+    schedulePoll(result.run_id);
+    loadHistory();
+  } catch (error) {
+    setError(error.message);
+    running = false;
+    button.disabled = false;
+    button.textContent = "开始协作";
+  }
+}
+
+function setRunningState(active) {
+  running = active;
+  const button = $("startBtn");
+  button.disabled = active;
+  button.textContent = active ? "运行中…" : "开始协作";
+}
+
+function schedulePoll(runId) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    try {
+      const data = await api(`/api/runs/${runId}`);
+      renderRun(data);
+      if (data.active) schedulePoll(runId);
+      else { setRunningState(false); loadPending(); loadHistory(); }
+    } catch (error) {
+      setError(error.message);
+      setRunningState(false);
+    }
+  }, 1000);
+}
+
+function selectRun(runId) {
+  currentRun = runId;
+  clearTimeout(pollTimer);
+  api(`/api/runs/${runId}`).then(data => {
+    renderRun(data);
+    setRunningState(Boolean(data.active));
+    if (data.active) schedulePoll(runId);
+  }).catch(error => setError(error.message));
+}
+
+function renderRun(data) {
+  const run = data.run || {};
+  const phase = run.phase || "-";
+  const status = run.status || "-";
+  $("runMeta").innerHTML = `${badge(status)} ${badge(phase)} <span class="muted">${esc(run.run_id || "")}</span>`;
+  if (run.goal) {
+    $("runMeta").innerHTML += `<div class="muted" style="margin-top:6px;max-width:700px">${esc(run.goal)}</div>`;
+  }
+  renderReview(run, data);
+  renderSteps(data.steps || []);
+  renderMessages(data.messages || []);
+  renderEvents(data.events || []);
+  if (data.error) setError(data.error);
+}
+
+function renderReview(run, data) {
+  const review = (run.metadata && run.metadata.review) || (data.result && data.result.review_result);
+  const box = $("review");
+  if (!review) { box.innerHTML = ""; return; }
+  const cls = review.decision === "approved" ? "approved" : (review.decision === "blocked" ? "failed" : "");
+  const findings = (review.findings || []).map(item => `
+    <li><strong>${esc(item.severity || "info")}</strong>
+      ${item.file ? ` · <code>${esc(item.file)}</code>` : ""}
+      ${item.location ? ` · ${esc(item.location)}` : ""}
+      <br>${esc(item.problem || "")}
+      ${item.suggested_action ? `<br><span class="muted">建议：${esc(item.suggested_action)}</span>` : ""}
+    </li>`).join("");
+  const evidence = (review.evidence || []).map(item => `<li>${esc(item)}</li>`).join("");
+  box.innerHTML = `
+    <div class="review ${cls}">
+      <h3>审查结论 ${badge(review.decision)} <span class="muted">confidence ${esc(review.confidence ?? "-")}</span></h3>
+      <div>${esc(review.summary || "")}</div>
+      ${findings ? `<ul>${findings}</ul>` : ""}
+      ${evidence ? `<div class="muted" style="margin-top:8px">证据</div><ul>${evidence}</ul>` : ""}
+    </div>`;
+}
+
+function renderSteps(steps) {
+  if (!steps.length) { $("tab-steps").innerHTML = `<div class="empty">暂无步骤。</div>`; return; }
+  $("tab-steps").innerHTML = `<table><thead><tr>
+    <th>轮次</th><th>角色</th><th>状态</th><th>耗时</th><th>错误</th>
+  </tr></thead><tbody>${steps.map(step => `
+    <tr>
+      <td>${esc(step.turn_id)}</td>
+      <td>${esc(step.agent)} / ${esc(step.role)}</td>
+      <td>${badge(step.state)}</td>
+      <td>${duration(step.started_at, step.finished_at)}</td>
+      <td class="muted">${esc(step.error || "")}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+
+function renderMessages(messages) {
+  if (!messages.length) { $("tab-messages").innerHTML = `<div class="empty">暂无消息。</div>`; return; }
+  $("tab-messages").innerHTML = messages.map(message => `
+    <details class="msg">
+      <summary>${badge(message.status)} turn ${esc(message.turn_id)}
+        · ${esc(message.from_agent)} → ${esc(message.to_agent)}
+        <span class="muted">${fmtTime(message.created_at)}</span>
+      </summary>
+      <pre>${esc(message.content)}</pre>
+    </details>`).join("");
+}
+
+function renderEvents(events) {
+  if (!events.length) { $("tab-events").innerHTML = `<div class="empty">暂无事件。</div>`; return; }
+  $("tab-events").innerHTML = `<table><thead><tr>
+    <th>#</th><th>时间</th><th>事件</th><th>阶段</th><th>payload</th>
+  </tr></thead><tbody>${events.map(event => `
+    <tr>
+      <td>${esc(event.seq)}</td>
+      <td>${fmtTime(event.created_at)}</td>
+      <td>${esc(event.event_type)}</td>
+      <td>${badge(event.phase)}</td>
+      <td class="muted" style="word-break:break-all">${esc(JSON.stringify(event.payload || {}).slice(0, 220))}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+
+async function loadPending() {
+  try {
+    const messages = await api("/api/pending");
+    if (!messages.length) { $("pendingList").innerHTML = `<div class="empty">没有未完成/隔离消息。</div>`; return; }
+    $("pendingList").innerHTML = messages.map(message => `
+      <div class="pending-item">
+        <div><strong>${esc(message.to_agent)}</strong> ${badge(message.status)}
+          <span class="muted">${esc(message.run_id)}</span></div>
+        <div class="preview">${esc((message.content || "").slice(0, 180))}</div>
+        <div class="actions">
+          <button onclick="resumeRun('${esc(message.run_id)}')">核对恢复</button>
+          <button class="danger" onclick="releaseMessage('${esc(message.run_id)}','${esc(message.message_id)}')">强制释放</button>
+        </div>
+      </div>`).join("");
+  } catch (error) {
+    $("pendingList").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+  }
+}
+
+async function resumeRun(runId) {
+  try {
+    const result = await api(`/api/runs/${runId}/resume`, { method: "POST", body: "{}" });
+    const summary = (result.results || []).map(item => `${item.action}: ${item.message_id}`).join("\n");
+    alert(summary || "没有未完成消息。");
+    loadPending();
+    if (currentRun === runId) selectRun(runId);
+  } catch (error) { alert(error.message); }
+}
+
+async function releaseMessage(runId, messageId) {
+  if (!confirm("强制释放会放弃等待远端结果，可能丢失上一轮回复；确认继续？")) return;
+  try {
+    await api(`/api/runs/${runId}/release`, {
+      method: "POST",
+      body: JSON.stringify({ message_id: messageId, force: true }),
+    });
+    loadPending();
+    if (currentRun === runId) selectRun(runId);
+  } catch (error) { alert(error.message); }
+}
+
+async function loadHistory() {
+  try {
+    const runs = await api("/api/runs?limit=15");
+    if (!runs.length) { $("history").innerHTML = `<div class="empty">还没有运行记录。</div>`; return; }
+    $("history").innerHTML = runs.map(run => `
+      <div class="history-item" onclick="selectRun('${esc(run.run_id)}')">
+        <div class="goal">${esc(run.goal || "(无目标)")}</div>
+        <div class="meta">${badge(run.status)} ${badge(run.phase)}
+          <span>${fmtTime(run.created_at)}</span>
+          <span>${esc(run.run_id.slice(0, 18))}…</span></div>
+      </div>`).join("");
+  } catch (error) {
+    $("history").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+  }
+}
+
+function bindTabs() {
+  document.querySelectorAll(".tab").forEach(button => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
+      button.classList.add("active");
+      for (const name of ["steps", "messages", "events"]) {
+        $(`tab-${name}`).classList.toggle("hidden", name !== button.dataset.tab);
+      }
+    });
+  });
+}
+
+async function boot() {
+  bindTabs();
+  $("startBtn").addEventListener("click", startRun);
+  $("healthBtn").addEventListener("click", checkHealth);
+  try {
+    await loadAgents();
+    loadHistory();
+    loadPending();
+    checkHealth();
+  } catch (error) {
+    setError(error.message);
+  }
+}
+
+boot();
+</script>
+</body>
+</html>
