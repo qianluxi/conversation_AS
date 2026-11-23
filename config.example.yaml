@@ -2,22 +2,32 @@
 # 所有字符串值都支持 ${ENV_VAR} 与 ${ENV_VAR:-默认值} 展开。
 
 agents:
-  # WorkBuddy 本地助理（PC 端在线助理，OAuth 2.1）
-  # 适合：直接驱动桌面版 WorkBuddy 助理。
+  # 实验性：通过 WorkBuddy 桌面端本地 IPC 调用内置 chat 接口，无需 OAuth。
+  # 需要 WorkBuddy 正在运行并已登录；属于内部接口，WorkBuddy 升级后可能失效。
   workbuddy:
-    type: workbuddy_local
-    base_url: https://www.workbuddy.cn
-    client_id: ${WORKBUDDY_CLIENT_ID}
-    client_secret: ${WORKBUDDY_CLIENT_SECRET}
-    redirect_uri: ${WORKBUDDY_REDIRECT_URI}
-    scope: "user.localassistant.readable user.localassistant.invokable"
-    token_file: data/workbuddy_token.json
+    type: workbuddy_ipc
+    client_id: conversation-as
+    client_kind: skill
+    model: auto
+    chat_path: /v2/chat/completions
     timeout: 300
-    poll_interval: 2
+    history_limit: 20
+    # 一般可自动发现；如提示找不到，手动指向：
+    # library_path: D:/Program Files/WorkBuddy/resources/app.asar.unpacked/resources/plugins/workbuddy-builtin/skills/library
 
-  # WorkBuddy 云端任务（ACP：SSE + JSON-RPC 2.0）
-  # 适合：长时间、流式、多轮讨论。需要 user.task.* 权限。
-  # 与上面的本地助理共用同一份 OAuth 应用和 token_file 即可。
+  # 官方 OAuth 本地助理（个人开发者通常无法申请到 localassistant scope，保留备用）
+  # workbuddy_openapi:
+  #   type: workbuddy_local
+  #   base_url: https://www.workbuddy.cn
+  #   client_id: ${WORKBUDDY_CLIENT_ID}
+  #   client_secret: ${WORKBUDDY_CLIENT_SECRET}
+  #   redirect_uri: ${WORKBUDDY_REDIRECT_URI}
+  #   scope: "user.localassistant.readable user.localassistant.invokable"
+  #   token_file: data/workbuddy_token.json
+  #   timeout: 300
+  #   poll_interval: 2
+
+  # 官方 OAuth 云端任务（ACP：SSE + JSON-RPC 2.0）
   # workbuddy_acp:
   #   type: workbuddy_acp
   #   base_url: https://www.workbuddy.cn
@@ -52,8 +62,8 @@ agents:
     # directory: F:/PyProjects/conversation_AS
     # 可选：固定 agent / 模型
     # agent: build
-    # provider_id: anthropic
-    # model_id: claude-sonnet-4
+    # provider_id: opencode-go
+    # model_id: deepseek-v4.1-flash
     timeout: 300
     poll_interval: 1
 

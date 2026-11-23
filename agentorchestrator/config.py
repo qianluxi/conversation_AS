@@ -209,6 +209,22 @@ class WorkBuddyAcpSettings(BaseModel):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
 
 
+class WorkBuddyIpcSettings(BaseModel):
+    """实验性：通过 WorkBuddy 桌面端本地 IPC（wbipc）调用内置 chat 接口。
+
+    不需要 OAuth，但依赖 WorkBuddy 正在运行、已登录，且版本包含 wbipc。
+    """
+
+    type: Literal["workbuddy_ipc"] = "workbuddy_ipc"
+    client_id: str = "conversation-as"
+    client_kind: str = "skill"
+    model: str = "auto"
+    chat_path: str = "/v2/chat/completions"
+    timeout: float = 300.0
+    history_limit: int = 20
+    library_path: str | None = None
+
+
 class MockSettings(BaseModel):
     type: Literal["mock"] = "mock"
     role: Literal["planner", "worker", "reviewer", "echo"] = "echo"
@@ -216,7 +232,13 @@ class MockSettings(BaseModel):
 
 
 AgentSettings = Annotated[
-    Union[OpencodeSettings, WorkBuddyLocalSettings, WorkBuddyAcpSettings, MockSettings],
+    Union[
+        OpencodeSettings,
+        WorkBuddyLocalSettings,
+        WorkBuddyAcpSettings,
+        WorkBuddyIpcSettings,
+        MockSettings,
+    ],
     Field(discriminator="type"),
 ]
 

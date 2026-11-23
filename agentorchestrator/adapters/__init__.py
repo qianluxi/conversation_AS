@@ -6,6 +6,7 @@ from ..config import (
     MockSettings,
     OpencodeSettings,
     WorkBuddyAcpSettings,
+    WorkBuddyIpcSettings,
     WorkBuddyLocalSettings,
 )
 from .base import (
@@ -22,6 +23,7 @@ from .base import (
 from .mock import MockAdapter
 from .opencode import OpenCodeAdapter
 from .workbuddy_acp import WorkBuddyAcpAdapter
+from .workbuddy_ipc import WorkBuddyIpcAdapter
 from .workbuddy_local import LocalAssistantGate, WorkBuddyLocalAdapter
 
 __all__ = [
@@ -38,6 +40,7 @@ __all__ = [
     "WorkBuddyLocalAdapter",
     "LocalAssistantGate",
     "WorkBuddyAcpAdapter",
+    "WorkBuddyIpcAdapter",
     "MockAdapter",
     "build_adapter",
     "build_adapters",
@@ -53,6 +56,8 @@ def build_adapter(name: str, settings: AgentSettings,
         return WorkBuddyLocalAdapter(name, settings, gate=local_gate)
     if isinstance(settings, WorkBuddyAcpSettings):
         return WorkBuddyAcpAdapter(name, settings)
+    if isinstance(settings, WorkBuddyIpcSettings):
+        return WorkBuddyIpcAdapter(name, settings)
     if isinstance(settings, MockSettings):
         return MockAdapter(name, settings)
     raise TypeError(f"未知的适配器类型：{type(settings).__name__}")

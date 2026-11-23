@@ -12,6 +12,7 @@
    ▼
 Orchestrator（本仓库）
    ├── WorkBuddyAdapter   ──► 本地助理 REST（OAuth 2.1，远端状态门）
+   ├── WorkBuddyIpcAdapter ─► 桌面端本地 IPC（实验性，无 OAuth，见 docs/WORKBUDDY_IPC.md）
    ├── WorkBuddyACPAdapter ─► 云端任务 ACP（SSE + JSON-RPC 2.0，会话串行）
    ├── OpenCodeAdapter    ──► opencode serve（REST，legacy 或 v2）
    └── SQLite（runs / sessions / messages / steps / run_events）
@@ -26,7 +27,7 @@ python -m agentorchestrator transcript --run-id <run_id>
 python -m agentorchestrator events --run-id <run_id>
 ```
 
-## 核心可靠性设计（v0.3）
+## 核心可靠性设计（v0.4）
 
 ### 1. 结构化审查（无关键字放行）
 
@@ -164,7 +165,30 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 
 ## 接入 WorkBuddy
 
-### OAuth 2.1
+### 个人开发者：桌面端本地 IPC（实验性，无需 OAuth）
+
+个人账号无法申请硬件接入的 `user.localassistant.*` Scope。作为替代，
+`workbuddy_ipc` 通过 WorkBuddy 桌面端自带的本地 IPC（`wbipc`）调用内置
+`POST /v2/chat/completions`，复用桌面端登录态，不需要企业认证。
+
+```yaml
+agents:
+  workbuddy:
+    type: workbuddy_ipc
+    model: auto
+```
+
+```powershell
+# WorkBuddy 桌面端保持运行并已登录
+python -m agentorchestrator health
+python -m agentorchestrator send --agent workbuddy --text "只回复 OK"
+python -m agentorchestrator run --goal "..." --planner workbuddy --worker opencode
+```
+
+注意：内部接口、无兼容性承诺；只有 chat 能力，没有桌面端工具/文件能力；
+详见 [docs/WORKBUDDY_IPC.md](docs/WORKBUDDY_IPC.md)。
+
+### 官方 OAuth 2.1（需企业认证）
 
 ```powershell
 python -m agentorchestrator auth url
@@ -223,7 +247,7 @@ python -m agentorchestrator release --run-id <id> --message-id <id> [--force]
 
 ```
 agentorchestrator/
-├── adapters/            # base / opencode / workbuddy_local / workbuddy_acp / mock
+├── adapters/            # base / opencode / workbuddy_local / workbuddy_acp / workbuddy_ipc / mock
 ├── messaging/schema.py  # Message / Run / Step / RunEvent / 迁移表
 ├── storage/database.py  # SQLite（WAL、迁移兼容、事务化完成）
 ├── orchestrator/engine.py
@@ -233,7 +257,8 @@ agentorchestrator/
 ├── config.py
 └── cli.py
 docs/USER_GUIDE.md
-tests/                   # 55 项：单元 + fake server + 故障注入
+docs/WORKBUDDY_IPC.md
+tests/                   # 57 项：单元 + fake server + 故障注入
 ```
 
 ## 测试

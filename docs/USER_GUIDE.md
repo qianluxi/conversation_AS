@@ -29,7 +29,7 @@ Windows PowerShell 为例，也可在 macOS/Linux 的 shell 中使用（环境�
 | --- | --- |
 | Python | 3.11+（本仓库在 3.12 验证） |
 | OpenCode | 已安装 `opencode`（本仓库按 1.19.0 的 OpenAPI 验证） |
-| WorkBuddy | PC 端已登录，或企业版云端任务可用（可选） |
+| WorkBuddy | 桌面端已登录并运行（推荐 `workbuddy_ipc`），或企业版云端任务可用（可选） |
 | 网络 | 仅需访问你配置的 OpenCode 与 WorkBuddy 地址 |
 
 检查：
@@ -121,10 +121,40 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 
 ## 5. 接入 WorkBuddy
 
-### 5.1 OAuth 2.1 授权（一次性）
+### 5.1 个人开发者：本地 IPC（无需 OAuth，实验性）
 
-在 WorkBuddy 开放平台创建应用，把 `client_id` / `client_secret` / 回调地址写入
-`config.yaml`，然后：
+个人账号无法申请硬件接入的 `user.localassistant.*` Scope。`workbuddy_ipc`
+走 WorkBuddy 桌面端自带的本地 IPC（`wbipc`）调用内置 chat 接口，复用桌面端
+登录态，不需要企业认证。
+
+前置条件：Windows、WorkBuddy 桌面端正在运行并已登录。
+
+```yaml
+agents:
+  workbuddy:
+    type: workbuddy_ipc
+    model: auto
+    timeout: 300
+    history_limit: 20
+```
+
+```powershell
+python -m agentorchestrator --config config.yaml health
+python -m agentorchestrator --config config.yaml send --agent workbuddy --text "只回复 OK"
+python -m agentorchestrator --config config.yaml run --goal "..." --planner workbuddy --worker opencode
+```
+
+说明：
+
+- 只有 chat 能力，没有桌面端工具/文件操作；适合做 planner / reviewer；
+- 内部接口，无兼容性承诺，WorkBuddy 升级后可能失效；
+- 首次连接可能需要在 WorkBuddy 内允许 IPC 客户端；
+- 详细原理与排查见 [WORKBUDDY_IPC.md](WORKBUDDY_IPC.md)。
+
+### 5.2 官方 OAuth 2.1 授权（需企业认证）
+
+在 WorkBuddy 开放平台创建应用（硬件接入），把 `client_id` / `client_secret` /
+回调地址写入 `config.yaml`，然后：
 
 ```powershell
 python -m agentorchestrator --config config.yaml auth url
@@ -135,7 +165,7 @@ python -m agentorchestrator --config config.yaml auth status
 
 token 写入 `data/workbuddy_token.json`，过期自动用 refresh_token 刷新。
 
-### 5.2 本地助理（`workbuddy_local`）
+### 5.3 本地助理（`workbuddy_local`）
 
 适合驱动 PC 端已登录的 WorkBuddy：
 
@@ -150,7 +180,7 @@ python -m agentorchestrator --config config.yaml send --agent workbuddy --text "
   `idle → submitted → running → idle`，异常进入 `quarantined`；
 - 超时后**不会**自动允许下一条消息，必须核对远端或人工释放（见第 8 节）。
 
-### 5.3 云端任务 ACP（`workbuddy_acp`）
+### 5.4 云端任务 ACP（`workbuddy_acp`）
 
 适合长任务、流式输出。在 `config.yaml` 启用：
 
@@ -336,7 +366,7 @@ cancelled）不可恢复；需要新任务请新建 run。
 | 路径 | 内容 |
 | --- | --- |
 | `data/orchestrator.db` | runs / sessions / messages / steps / run_events |
-| `data/workbuddy_token.json` | WorkBuddy OAuth token（勿提交） |
+| `data/workbuddy_token.json` | WorkBuddy OAuth token（仅官方 OAuth 适配器使用；勿提交） |
 | `logs/`（如果启用文件日志） | 运行日志 |
 
 排查 SQL：
