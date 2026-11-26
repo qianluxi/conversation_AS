@@ -113,6 +113,11 @@ class OpenCodeAdapter(AgentAdapter):
                                 metadata={"path": path, "raw": payload})
         raise AdapterError(f"OpenCode 健康检查失败：{last_error}")
 
+    async def get_path(self) -> dict[str, Any]:
+        """返回 OpenCode 服务端的默认目录/工作区信息。"""
+        response = await self._request("GET", "/path", timeout=10)
+        return response.json()
+
     async def list_models(self) -> dict[str, Any]:
         """返回已配置/可用的 provider/model 列表（绝不包含 API key）。"""
         response = await self._request("GET", "/config/providers", timeout=20)

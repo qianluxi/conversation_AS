@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,8 @@ class StartRunRequest(BaseModel):
     max_rounds: int = Field(default=2, ge=1, le=10)
     timeout: float | None = Field(default=None, gt=0)
     opencode_model: str | None = None
+    opencode_directory: str | None = None
+    opencode_agent: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -75,18 +78,23 @@ def _json(model: Any) -> Any:
     return model.model_dump(mode="json")
 
 
-def _apply_opencode_model(adapters: dict[str, Any], spec: str | None) -> None:
-    if not spec or "/" not in spec:
-        return
-    provider_id, model_id = spec.split("/", 1)
-    if not provider_id or not model_id:
+def _apply_opencode_overrides(adapters: dict[str, Any], spec: str | None,
+                              directory: str | None,
+                              agent: str | None = None) -> None:
+    updates: dict[str, Any] = {}
+    if spec and "/" in spec:
+        provider_id, model_id = spec.split("/", 1)
+        if provider_id and model_id:
+            updates.update(provider_id=provider_id, model_id=model_id)
+    if directory:
+        updates["directory"] = directory
+    if agent:
+        updates["agent"] = agent
+    if not updates:
         return
     for adapter in adapters.values():
         if getattr(adapter, "kind", "") == "opencode":
-            adapter.settings = adapter.settings.model_copy(update={
-                "provider_id": provider_id,
-                "model_id": model_id,
-            })
+            adapter.settings = adapter.settings.model_copy(update=updates)
 
 
 def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[str, Any]:
@@ -190,7 +198,16 @@ def create_app(config: AppConfig, store: Store,
                 data = await adapter.list_models()
             except AdapterError as exc:
                 raise HTTPException(409, str(exc)) from exc
-            return {"agent": name, **data}
+            try:
+                path_info = await adapter.get_path()
+            except Exception:  # noqa: BLE001 - 仅用于展示默认目录
+                path_info = {}
+            return {
+                "agent": name,
+                **data,
+                "suggested_directory": adapter.settings.directory or os.getcwd(),
+                "server_directory": path_info.get("directory"),
+            }
         finally:
             for adapter in adapters.values():
                 try:
@@ -215,8 +232,16 @@ def create_app(config: AppConfig, store: Store,
         if missing:
             raise HTTPException(400, f"未配置 agent: {', '.join(missing)}")
 
+        directory = None
+        if payload.opencode_directory:
+            candidate = Path(payload.opencode_directory).expanduser()
+            if not candidate.is_dir():
+                raise HTTPException(400, f"OpenCode 工作目录不存在：{payload.opencode_directory}")
+            directory = str(candidate.resolve())
+
         adapters = build_adapters(cfg)
-        _apply_opencode_model(adapters, payload.opencode_model)
+        _apply_opencode_overrides(adapters, payload.opencode_model, directory,
+                                  payload.opencode_agent)
         try:
             conversation = Conversation(store, adapters, goal=payload.goal)
         except Exception:

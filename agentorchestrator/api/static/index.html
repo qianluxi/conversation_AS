@@ -133,9 +133,24 @@
       </div>
       <div class="row" style="grid-template-columns: 1fr">
         <div>
+          <label>OpenCode 工作目录（只检查和修改这里的代码）</label>
+          <input id="opencodeDirectory" type="text" placeholder="例如 F:/PyProjects/conversation_AS">
+          <div id="directoryHint" class="muted" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="row" style="grid-template-columns: 1fr 1fr">
+        <div>
           <label>OpenCode 模型</label>
           <select id="opencodeModel"></select>
           <div id="modelHint" class="muted" style="margin-top:6px"></div>
+        </div>
+        <div>
+          <label>OpenCode 执行角色</label>
+          <select id="opencodeAgent">
+            <option value="plan">plan（只读检查，推荐）</option>
+            <option value="build">build（可修改代码）</option>
+          </select>
+          <div class="muted" style="margin-top:6px">只检查代码请用 plan；需要修改再切换到 build。</div>
         </div>
       </div>
       <div class="row-2">
@@ -264,6 +279,10 @@ async function loadModels() {
       target = `${preferred.provider_id}/${preferred.model_id}`;
     }
     if ([...select.options].some(option => option.value === target)) select.value = target;
+    const directory = data.suggested_directory || "";
+    if (!$("opencodeDirectory").value) $("opencodeDirectory").value = directory;
+    const serverDir = data.server_directory ? `；OpenCode 服务默认目录：${data.server_directory}` : "";
+    $("directoryHint").textContent = `留空则使用配置/服务默认目录${serverDir}`;
     hint.textContent = "若默认模型报鉴权错误，请改选其他已配置的模型。";
   } catch (error) {
     select.innerHTML = `<option value="">使用配置默认</option>`;
@@ -306,6 +325,8 @@ async function startRun() {
       worker: $("worker").value,
       reviewer: $("reviewer").value || null,
       opencode_model: $("opencodeModel").value || null,
+      opencode_directory: $("opencodeDirectory").value.trim() || null,
+      opencode_agent: $("opencodeAgent").value || null,
       max_rounds: Number($("maxRounds").value) || 2,
       timeout: Number($("timeout").value) || 300,
     };

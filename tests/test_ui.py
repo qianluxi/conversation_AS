@@ -94,3 +94,39 @@ def test_loopback_host_detection() -> None:
     assert is_loopback_host("::1")
     assert not is_loopback_host("0.0.0.0")
     assert not is_loopback_host("192.168.1.10")
+
+def test_apply_opencode_overrides() -> None:
+    from agentorchestrator.api.server import _apply_opencode_overrides
+    from agentorchestrator.config import OpencodeSettings
+
+    class Dummy:
+        kind = "opencode"
+
+        def __init__(self) -> None:
+            self.settings = OpencodeSettings()
+
+    dummy = Dummy()
+    _apply_opencode_overrides({"oc": dummy}, "p/m", "F:/repo", "plan")
+    assert dummy.settings.provider_id == "p"
+    assert dummy.settings.model_id == "m"
+    assert dummy.settings.directory == "F:/repo"
+    assert dummy.settings.agent == "plan"
+
+
+def test_start_rejects_missing_opencode_directory(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.storage.path)
+    app = create_app(config, store)
+    try:
+        with TestClient(app) as client:
+            missing = str(tmp_path / "not-a-repo")
+            response = client.post("/api/runs", json={
+                "goal": "检查代码",
+                "planner": "planner",
+                "worker": "worker",
+                "opencode_directory": missing,
+            })
+            assert response.status_code == 400
+            assert "工作目录不存在" in response.json()["detail"]
+    finally:
+        store.close()

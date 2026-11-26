@@ -61,7 +61,7 @@ agents:
     # OpenCode 工作目录；不填则使用 OpenCode 服务端默认目录，建议填绝对路径。
     # directory: F:/PyProjects/conversation_AS
     # 可选：固定 agent / 模型
-    # agent: build
+    # agent: build   # build 可修改代码；plan 只读检查（界面可按次覆盖）
     # provider_id: opencode-go
     # model_id: deepseek-v4.1-flash
     timeout: 300

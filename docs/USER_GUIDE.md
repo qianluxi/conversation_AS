@@ -119,6 +119,46 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 
 ---
 
+### 4.1 OpenCode 实际检查哪个目录？
+
+只有 **OpenCode** 会读取/修改代码；`workbuddy`（IPC/官方 API）只负责方案与审查，
+它没有文件系统访问能力。因此“检查代码”具体检查哪里，完全由 OpenCode 会话的
+工作目录决定。
+
+选择顺序：
+
+1. **界面「OpenCode 工作目录」**（每次运行可改；API 字段 `opencode_directory`）；
+   目录必须存在，否则启动会被拒绝；
+2. `config.yaml` 中 `agents.opencode.directory`（推荐填绝对路径）；
+3. 以上都没有时，使用 OpenCode 服务端默认目录（`GET /path` 返回的 `directory`）。
+
+注意：OpenCode 服务默认目录不一定是你的项目。本机当前默认是
+`C:\Users\Administrator\.config\opencode`，所以不指定目录时，“检查代码”不会检查
+`F:\PyProjects\conversation_AS`。任务目标里的“检查代码”只是自然语言，不会被
+协调器解析成路径。
+
+执行角色决定权限边界：
+
+- `plan`：只读检查，不能修改文件（检查代码请用这个）；
+- `build`：可以编辑、提交甚至执行命令。任务目标里写“只读/不要修改”**不是**
+  权限控制，只是提示，不能阻止 `build` 修改代码。
+
+另外：Planner 也看不到文件，只能根据目标写方案，可能误判仓库现状。如果只是读取
+某个文件/变量，请在目标里写清楚文件名与期望输出，或把执行角色设为 `plan` 并在
+审查意见中纠正。
+
+推荐显式指定目录，并检查任务选 `plan`：
+
+```yaml
+agents:
+  opencode:
+    type: opencode
+    directory: F:/PyProjects/conversation_AS
+```
+
+或在界面中把「OpenCode 工作目录」填成该绝对路径。启动一次后可在 OpenCode
+会话信息里核对 `directory` 字段。
+
 ## 5. 接入 WorkBuddy
 
 ### 5.1 个人开发者：本地 IPC（无需 OAuth，实验性）
@@ -233,8 +273,10 @@ python -m agentorchestrator --config config.yaml ui
 默认自动打开 `http://127.0.0.1:8765/`。界面内可以：
 
 - 检查 agent 连接；
-- 填写任务目标，选择 Planner / Worker / Reviewer、**OpenCode 模型**、最大轮数与
-  超时并启动协作；模型下拉默认优先选择已配置的 `opencode-go` 模型；
+- 填写任务目标，选择 Planner / Worker / Reviewer、**OpenCode 工作目录**、
+  **OpenCode 模型**、**执行角色**、最大轮数与超时并启动协作；
+  模型下拉默认优先选择已配置的 `opencode-go` 模型，工作目录默认取启动 UI 的目录；
+  执行角色默认 `plan`（只读）；需要改代码时切到 `build`；
 - 实时查看运行状态、步骤耗时、消息全文、状态机事件和结构化审查结果；
 - 在「待处理 / 隔离消息」中执行核对恢复或强制释放；
 - 从历史运行列表点击回看。

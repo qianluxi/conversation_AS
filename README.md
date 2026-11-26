@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.6.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.6.1`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -50,8 +50,10 @@ python -m agentorchestrator ui
 默认自动打开 `http://127.0.0.1:8765/`，包含：
 
 - 一键检查各 agent 连接状态；
-- 填写目标任务，选择 Planner / Worker / Reviewer 与 **OpenCode 模型**；
-  默认优先选择已配置的 `opencode-go` 模型，避免默认模型鉴权失败；
+- 填写目标任务，选择 Planner / Worker / Reviewer、**OpenCode 工作目录**与
+  **OpenCode 模型**；目录决定实际检查/修改哪个项目的代码，默认取启动 UI 的目录；
+  模型默认优先选择已配置的 `opencode-go` 模型，避免默认模型鉴权失败；
+- **OpenCode 执行角色**：`plan`（只读检查，默认）/ `build`（可修改代码）；
 - 点击「开始协作」后实时查看运行状态、步骤耗时、消息全文、状态机事件；
 - 结构化审查结果（结论、findings、evidence、confidence）；
 - 待处理/隔离消息的「核对恢复」与「强制释放」；
@@ -190,6 +192,14 @@ permissions:
 
 ## 接入 OpenCode
 
+OpenCode 的会话绑定一个工作目录：优先使用界面/`opencode_directory`，其次
+`config.yaml` 的 `agents.opencode.directory`，最后才是 OpenCode 服务端默认目录。
+WorkBuddy 只做方案与审查，不接触文件；**实际检查/修改哪个仓库由该目录决定**，
+建议显式填绝对路径（例如 `F:/PyProjects/conversation_AS`）。
+
+执行角色决定权限边界：`plan` 为只读检查，`build` 可修改甚至提交代码。
+自然语言里的“只读/不要修改”只是提示，不是权限控制；检查代码请使用 `plan`。
+
 ```powershell
 $env:OPENCODE_SERVER_PASSWORD = "your-strong-password"
 opencode serve --hostname 127.0.0.1 --port 4096
@@ -310,7 +320,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 69 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 71 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 测试
@@ -323,6 +333,16 @@ python -m pytest
 权限误分类（`spreadsheet.write`、`thread.create`）、超时后隔离与恢复、
 UNKNOWN 不重发、完成事务回滚、终态不可逆、跨 run dedupe/release 隔离、
 OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选恢复等。
+
+## 已知边界（当前版本）
+
+- Planner/Reviewer（WorkBuddy）没有文件系统访问能力，可能误判仓库现状；
+  Planner 也可能把“读取 README 第一行”误解成“重写 README”。
+- Reviewer 的 evidence 是模型自报，协调器尚未独立执行测试或核对 git diff，
+  因此它是结构化 AI 审查，不是完整质量门禁。
+- “只读/不要修改”写在任务目标里只是提示；真正的只读边界是把 OpenCode
+  执行角色设为 `plan`。
+- 只恢复消息级状态，尚未实现工作流级断点续跑。
 
 ## 后续（阶段三）
 
