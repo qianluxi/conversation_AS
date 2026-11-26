@@ -143,6 +143,9 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 - `build`：可以编辑、提交甚至执行命令。任务目标里写“只读/不要修改”**不是**
   权限控制，只是提示，不能阻止 `build` 修改代码。
 
+选择工作目录后，协调器会把“当前工作目录”写入 Planner/Worker/Reviewer 的提示：
+“检查代码/项目”时不需要再粘贴代码，执行者应在该目录内直接使用工具检查。
+
 另外：Planner 也看不到文件，只能根据目标写方案，可能误判仓库现状。如果只是读取
 某个文件/变量，请在目标里写清楚文件名与期望输出，或把执行角色设为 `plan` 并在
 审查意见中纠正。

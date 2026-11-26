@@ -481,20 +481,32 @@ class Conversation:
 async def run_collaboration(conversation: Conversation, *,
                             planner: str, worker: str, reviewer: str | None = None,
                             max_rounds: int = 2, goal: str = "",
-                            timeout: float | None = None) -> dict[str, Any]:
+                            timeout: float | None = None,
+                            workspace: str | None = None) -> dict[str, Any]:
     """结构化流程：分析 -> 执行 -> 结构化审查，失败则回退给执行者。"""
     reviewer = reviewer or planner
-    metadata: dict[str, Any] = {"planner": planner, "worker": worker, "reviewer": reviewer}
+    metadata: dict[str, Any] = {"planner": planner, "worker": worker, "reviewer": reviewer,
+                                "workspace": workspace}
+    workspace_context = ""
+    if workspace:
+        workspace_context = (
+            f"当前 OpenCode 工作目录：{workspace}\n"
+            "代码就在该目录；用户说“检查代码/审查项目”时，"
+            "不要要求用户粘贴代码或等待补充，直接在该目录检查。\n"
+        )
     try:
         conversation.set_phase(RunPhase.ANALYZING)
         plan_reply = await conversation.ask(
             planner,
             "你是需求分析与方案设计者。请针对下面的协作任务形成可执行的任务方案。\n"
             f"任务：{goal}\n"
+            f"{workspace_context}"
             "要求：\n"
             "- 你无法访问文件系统或执行命令，不要猜测仓库内容，也不要假设 README/代码现状；\n"
+            "- 但执行者可以访问上述工作目录；检查代码任务应在方案中明确要求执行者在"
+            "该目录读取文件/运行 git，并给出实际证据；\n"
+            "- 不要写“等待用户提供代码”，也不要向用户提问或要求确认；\n"
             "- 只给出步骤、检查项、期望结果与判定标准；\n"
-            "- 不要向用户提问，不要要求确认，直接给出最终可执行方案；\n"
             "- 如果任务很简单（例如只输出一行文本），方案必须保持极简，"
             "不要扩展交付物、检查清单或额外字段；\n"
             "- 只做方案，不要修改代码。\n"
@@ -515,12 +527,13 @@ async def run_collaboration(conversation: Conversation, *,
             work_reply = await conversation.ask(
                 worker,
                 "你是任务执行者。请严格依据任务方案完成工作。\n"
-                "只有当方案明确要求检查或修改本地代码时才使用工具；"
-                "否则直接给出结果，不要额外检查项目。\n"
+                f"{workspace_context}"
+                "涉及代码检查/修改时，直接在工作目录使用工具（读取文件、rg、git 等），"
+                "不要等待用户粘贴代码；只有方案明确不涉及代码时才直接给出文本结果。\n"
                 "如果方案包含对仓库现状的断言，必须先实际读取/执行验证，以工具结果为准。\n"
                 f"【任务方案】\n{plan}\n"
                 f"【上一轮审查意见】\n{issues or '无'}\n"
-                "要求：说明你做了什么；不要改动任务范围之外的文件。",
+                "要求：说明你实际检查了哪些文件/命令；不要改动任务范围之外的文件。",
                 turn_id=round_no, timeout=timeout,
                 dedupe_key=f"{conversation.run_id}:{round_no}:{worker}",
                 role="worker", phase=RunPhase.EXECUTING,
@@ -529,9 +542,11 @@ async def run_collaboration(conversation: Conversation, *,
             review_reply = await conversation.ask(
                 reviewer,
                 "你是审查者。请结合任务方案与执行结果进行审查。\n"
+                f"{workspace_context}"
                 "只检查执行结果是否满足既定方案，不要提出方案之外的新要求；"
                 "若满足方案且证据充分，应判定 approved。方案中对仓库现状的断言不一定为真，"
-                "请以执行结果中的实际证据为准。\n"
+                "请以执行结果中的实际证据为准。如果工作目录已提供，而执行结果声称"
+                "“未收到代码”，应视为未完成任务。\n"
                 f"【任务方案】\n{plan}\n"
                 f"【执行结果】\n{work_reply.text}\n\n"
                 f"{REVIEW_CONTRACT}",

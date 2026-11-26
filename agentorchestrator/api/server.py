@@ -259,6 +259,7 @@ def create_app(config: AppConfig, store: Store,
                     planner=payload.planner, worker=payload.worker,
                     reviewer=payload.reviewer, max_rounds=payload.max_rounds,
                     goal=payload.goal, timeout=payload.timeout,
+                    workspace=directory,
                 )
             except Exception as exc:  # noqa: BLE001 - 记录到 UI
                 handle.error = f"{type(exc).__name__}: {exc}"

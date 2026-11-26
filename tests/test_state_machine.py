@@ -230,3 +230,37 @@ def test_invalid_review_does_not_approve(tmp_path: Path) -> None:
     assert stored_run.phase is RunPhase.FAILED
     assert stored_run.metadata["reason"] == "invalid_review"
     store.close()
+
+def test_workspace_context_is_passed_to_all_agents(tmp_path: Path) -> None:
+    import json
+
+    store = Store(tmp_path / "workspace.db")
+    approved = json.dumps({
+        "decision": "approved",
+        "summary": "ok",
+        "findings": [],
+        "evidence": ["checked"],
+        "confidence": 0.95,
+    })
+    adapters = {
+        "planner": ScriptedAdapter("planner", ["任务方案"]),
+        "worker": ScriptedAdapter("worker", ["执行完成"]),
+        "reviewer": ScriptedAdapter("reviewer", [approved]),
+    }
+    conversation = Conversation(store, adapters, goal="检查代码")
+
+    async def scenario() -> dict:
+        try:
+            return await run_collaboration(
+                conversation, planner="planner", worker="worker",
+                reviewer="reviewer", max_rounds=1, goal="检查代码",
+                workspace="F:/repo",
+            )
+        finally:
+            await conversation.close()
+
+    result = run(scenario())
+    assert result["approved"] is True
+    for name in ("planner", "worker", "reviewer"):
+        assert any("F:/repo" in call for call in adapters[name].calls)
+    store.close()
