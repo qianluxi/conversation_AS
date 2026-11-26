@@ -203,3 +203,66 @@ def test_release_requires_confirmation_or_force(store: Store) -> None:
     assert "message_released" in [
         event.event_type for event in store.list_events(run_model.run_id)
     ]
+
+def test_release_rejects_message_from_another_run(store: Store) -> None:
+    run_a = store.create_run("a")
+    run_b = store.create_run("b")
+    message = Message(run_id=run_a.run_id, from_agent="orchestrator",
+                      to_agent="worker", content="x", status=MessageStatus.UNKNOWN)
+    store.save_message(message)
+    conversation = Conversation(
+        store, {"worker": MockAdapter("worker", MockSettings())}, run_id=run_b.run_id
+    )
+
+    async def scenario() -> None:
+        try:
+            await conversation.release(message.message_id, force=True)
+        finally:
+            await conversation.close()
+
+    with pytest.raises(ValueError):
+        run(scenario())
+    assert store.get_message(message.message_id).status is MessageStatus.UNKNOWN
+
+
+def test_complete_exchange_rejects_cross_run_reply(store: Store) -> None:
+    run_a = store.create_run("a")
+    run_b = store.create_run("b")
+    step = Step(run_id=run_a.run_id, agent="worker", role="worker",
+                state=StepState.RUNNING, started_at=utc_now())
+    store.create_step(step)
+    outgoing = Message(run_id=run_a.run_id, from_agent="orchestrator",
+                       to_agent="worker", content="task",
+                       status=MessageStatus.ACKNOWLEDGED,
+                       metadata={"step_id": step.step_id})
+    store.save_message(outgoing)
+    reply = Message(run_id=run_b.run_id, from_agent="worker",
+                    to_agent="orchestrator", content="reply",
+                    status=MessageStatus.COMPLETED, reply_to=outgoing.message_id)
+    with pytest.raises(ValueError):
+        store.complete_exchange(
+            outgoing_message_id=outgoing.message_id, reply=reply,
+            step_id=step.step_id, run_id=run_a.run_id, current_turn=1,
+        )
+    assert store.get_message(outgoing.message_id).status is MessageStatus.ACKNOWLEDGED
+    assert store.get_step(step.step_id).state is StepState.RUNNING
+
+
+def test_terminal_run_cannot_retry_failed_dedupe(store: Store) -> None:
+    conversation = Conversation(
+        store, {"worker": MockAdapter("worker", MockSettings())}, goal="terminal retry"
+    )
+    store.save_message(Message(
+        run_id=conversation.run_id, from_agent="orchestrator", to_agent="worker",
+        content="x", status=MessageStatus.FAILED, dedupe_key="terminal-key",
+    ))
+
+    async def scenario() -> None:
+        try:
+            conversation.finish(RunStatus.FAILED, RunPhase.FAILED)
+            with pytest.raises(RuntimeError):
+                await conversation.ask("worker", "x", dedupe_key="terminal-key")
+        finally:
+            await conversation.close()
+
+    run(scenario())

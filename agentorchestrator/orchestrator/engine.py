@@ -120,10 +120,16 @@ class Conversation:
         adapter = self.adapter(agent)
 
         if dedupe_key:
-            existing = self.store.find_by_dedupe(dedupe_key)
+            existing = self.store.find_by_dedupe(self.run_id, dedupe_key)
             if existing is not None:
                 reply = self.store.find_reply(existing.message_id)
                 if reply is None and existing.status is MessageStatus.FAILED:
+                    self._refresh()
+                    if (self.run.status is not RunStatus.RUNNING
+                            or self.run.phase in TERMINAL_PHASES):
+                        raise RuntimeError(
+                            "当前 run 已结束，不能重试 FAILED 消息；请新建 run。"
+                        )
                     binding = await self.session_for(agent)
                     self.store.update_message(existing.message_id,
                                               status=MessageStatus.CREATED, error=None)
@@ -377,6 +383,8 @@ class Conversation:
         message = self.store.get_message(message_id)
         if message is None:
             raise KeyError(f"未知 message_id: {message_id}")
+        if message.run_id != self.run_id:
+            raise ValueError(f"消息 {message_id} 不属于 run {self.run_id}")
         if message.reply_to is not None:
             raise ValueError("回复消息不能被 release")
         if self.store.find_reply(message_id) is not None:
@@ -417,7 +425,8 @@ class Conversation:
                 except AdapterError:
                     await adapter.cancel_wait(binding.provider_session_id)
         released = self.store.release_message(
-            message_id, reason="manual force release（已放弃等待远端结果）",
+            self.run_id, message_id,
+            reason="manual force release（已放弃等待远端结果）",
         )
         self.event("run_released", step_id=(message.metadata or {}).get("step_id"),
                    payload={"message_id": message_id})

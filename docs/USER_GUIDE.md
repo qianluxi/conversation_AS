@@ -158,12 +158,13 @@ python -m agentorchestrator --config config.yaml run --goal "..." --planner work
 
 ```powershell
 python -m agentorchestrator --config config.yaml auth url
-# 浏览器打开输出链接 → 授权 → 从回调地址复制 code
-python -m agentorchestrator --config config.yaml auth exchange <code>
+# 浏览器打开输出链接 → 授权 → 从回调地址同时复制 code 和 state
+python -m agentorchestrator --config config.yaml auth exchange <code> --state <state>
 python -m agentorchestrator --config config.yaml auth status
 ```
 
-token 写入 `data/workbuddy_token.json`，过期自动用 refresh_token 刷新。
+`auth url` 会把 state 写入本地（10 分钟有效）；`auth exchange` 会校验 state，
+不匹配或过期会拒绝交换。token 写入 `data/workbuddy_token.json`，过期自动刷新。
 
 ### 5.3 本地助理（`workbuddy_local`）
 
@@ -238,8 +239,16 @@ python -m agentorchestrator --config config.yaml ui
 - 在「待处理 / 隔离消息」中执行核对恢复或强制释放；
 - 从历史运行列表点击回看。
 
-只监听 `127.0.0.1`；不要改成 `0.0.0.0` 暴露到局域网。可选参数：
-`--host 127.0.0.1`、`--port 8765`、`--no-browser`（不自动打开浏览器）。
+默认只监听 `127.0.0.1`。如果改成非回环地址（例如 `--host 0.0.0.0`），必须提供
+访问密码，否则拒绝启动：
+
+```powershell
+$env:AGENTORCHESTRATOR_UI_TOKEN = "请换成强密码"
+python -m agentorchestrator --config config.yaml ui --host 0.0.0.0 --token $env:AGENTORCHESTRATOR_UI_TOKEN
+```
+
+启用后页面、API 和 `/api/docs` 都需要 HTTP Basic Auth：用户名任意，密码为 token。
+可选参数：`--port 8765`、`--no-browser`（不自动打开浏览器）。
 
 ### 6.2 命令行
 
@@ -318,7 +327,14 @@ python -m agentorchestrator --config config.yaml run --goal "审查特征工程�
   - 若报 `invalid api key`（例如默认 DeepSeek key 失效），在界面「OpenCode 模型」
     中改选已配置的模型（推荐 `opencode-go/deepseek-v4.1-flash`），或在配置中设置
     `provider_id` / `model_id`。
-- WorkBuddy：`auth status` 检查；必要时 `auth url` + `auth exchange` 重新授权。
+- WorkBuddy：`auth status` 检查；必要时 `auth url` + `auth exchange <code> --state <state>` 重新授权。
+
+### 8.1.1 界面返回 401
+
+- 启动时设置了 `--token` 或 `AGENTORCHESTRATOR_UI_TOKEN`：浏览器应弹出登录框，
+  用户名任意，密码为 token；
+- 如果输错或取消，刷新页面重新输入；脚本调用使用
+  `Authorization: Bearer <token>`。
 
 ### 8.2 等待超时 / 结果未知（`unknown`）
 

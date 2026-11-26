@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
-import secrets
+import os
 import sys
 import threading
 import webbrowser
@@ -190,7 +190,7 @@ async def _cmd_pending(_config: AppConfig, store: Store, args: argparse.Namespac
 def _cmd_ui(config: AppConfig, store: Store, args: argparse.Namespace) -> int:
     try:
         import uvicorn
-        from .api.server import create_app
+        from .api.server import create_app, is_loopback_host
     except ImportError:
         print(
             "缺少 Web 依赖。请运行：python -m pip install -e \".[web]\" 或 "
@@ -198,9 +198,21 @@ def _cmd_ui(config: AppConfig, store: Store, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    app = create_app(config, store)
-    url = f"http://{args.host}:{args.port}/"
+    token = args.token or os.environ.get("AGENTORCHESTRATOR_UI_TOKEN") or None
+    if not is_loopback_host(args.host) and not token:
+        print(
+            "拒绝启动：监听非回环地址时必须启用认证。\n"
+            "请设置 --token <随机密码> 或环境变量 AGENTORCHESTRATOR_UI_TOKEN。\n"
+            "例如：python -m agentorchestrator ui --host 0.0.0.0 --token <密码>",
+            file=sys.stderr,
+        )
+        return 2
+    app = create_app(config, store, auth_token=token)
+    browser_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    url = f"http://{browser_host}:{args.port}/"
     print(f"图形界面：{url}")
+    if token:
+        print("已启用认证：浏览器会弹出登录框；用户名任意，密码为 --token。")
     print("按 Ctrl+C 停止。")
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
@@ -263,11 +275,15 @@ async def _cmd_auth(config: AppConfig, args: argparse.Namespace) -> int:
     )
     try:
         if args.auth_command == "url":
-            state = args.state or secrets.token_urlsafe(8)
-            print(auth.build_authorize_url(state=state))
+            url, state = auth.begin_authorization(args.state)
+            print(url)
             print(f"\nstate = {state}")
+            print("授权后请执行：auth exchange <code> --state <state>")
         elif args.auth_command == "exchange":
-            token = await auth.exchange_code(args.code)
+            if not args.state:
+                print("缺少 --state：请从回调地址复制 state，与 code 一起提交。", file=sys.stderr)
+                return 2
+            token = await auth.exchange_code(args.code, args.state)
             print("授权成功。access_token 已写入本地文件（不会显示）。")
             print(f"scope = {token.get('scope')}")
         elif args.auth_command == "refresh":
@@ -361,6 +377,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    ui.add_argument("--token", default=None,
+                    help="访问密码；非回环地址必须提供（或设置 AGENTORCHESTRATOR_UI_TOKEN）")
 
     auth = sub.add_parser("auth", help="WorkBuddy OAuth 授权")
     auth.add_argument("--agent", default=None)
@@ -369,6 +387,8 @@ def _build_parser() -> argparse.ArgumentParser:
     auth_url.add_argument("--state", default=None)
     auth_exchange = auth_sub.add_parser("exchange")
     auth_exchange.add_argument("code")
+    auth_exchange.add_argument("--state", required=True,
+                               help="auth url 输出、回调地址中的 state")
     auth_sub.add_parser("refresh")
     auth_sub.add_parser("status")
     return parser

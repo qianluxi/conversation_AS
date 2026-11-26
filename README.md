@@ -1,9 +1,11 @@
 # WorkBuddy + OpenCode 双智能体编排器
 
+[![CI](https://github.com/qianluxi/conversation_AS/actions/workflows/ci.yml/badge.svg)](https://github.com/qianluxi/conversation_AS/actions/workflows/ci.yml)
+
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.5.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.6.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -55,11 +57,16 @@ python -m agentorchestrator ui
 - 待处理/隔离消息的「核对恢复」与「强制释放」；
 - 历史运行列表，点击回看。
 
-界面只监听 `127.0.0.1`，默认不对外暴露。常用参数：
-`--host 127.0.0.1`、`--port 8765`、`--no-browser`。详细说明见
+界面默认只监听 `127.0.0.1`，不对外暴露。常用参数：
+`--host 127.0.0.1`、`--port 8765`、`--no-browser`。
+
+安全限制：如果监听非回环地址（例如 `--host 0.0.0.0`），必须同时提供
+`--token <密码>` 或环境变量 `AGENTORCHESTRATOR_UI_TOKEN`，否则拒绝启动。
+启用 token 后，页面、`/api/*` 与 `/api/docs` 都要求 HTTP Basic Auth
+（用户名任意，密码为 token）。详细说明见
 [docs/USER_GUIDE.md 第 6.1 节](docs/USER_GUIDE.md#61-图形界面推荐)。
 
-## 核心可靠性设计（v0.5）
+## 核心可靠性设计（v0.6）
 
 ### 1. 结构化审查（无关键字放行）
 
@@ -126,6 +133,14 @@ python -m agentorchestrator release --run-id <id> --message-id <id> --force
 
 任一步失败全部回滚；`resume` 还会修复历史不一致（消息 completed 但回复缺失时
 将 step 标为 failed）。
+
+数据归属校验：
+
+- `dedupe_key` 唯一索引为 `(run_id, dedupe_key)`，查询也限定当前 run，
+  避免跨 run 命中；
+- `complete_exchange()` 校验消息、回复、step、run 的归属一致；
+- `release()` 在引擎和数据库两层校验消息必须属于当前 run；
+- 终态 run 不允许重试 `FAILED` 消息，必须新建 run。
 
 ### 5. WorkBuddy 本地助理：显式远端状态门
 
@@ -224,9 +239,13 @@ python -m agentorchestrator run --goal "..." --planner workbuddy --worker openco
 
 ```powershell
 python -m agentorchestrator auth url
-python -m agentorchestrator auth exchange <code>
+# 浏览器授权后，从回调地址同时复制 code 与 state
+python -m agentorchestrator auth exchange <code> --state <state>
 python -m agentorchestrator auth status
 ```
+
+`auth url` 会把 state 写入本地（10 分钟有效）；`auth exchange` 校验通过后才会
+交换 token，缺失或不匹配会直接拒绝，防止 CSRF/复制错误。
 
 token 保存在 `data/workbuddy_token.json`（已 gitignore），过期自动刷新。
 
@@ -291,7 +310,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 58 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 69 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 测试
@@ -302,11 +321,15 @@ python -m pytest
 
 测试不需要真实凭据，覆盖：结构化审查拒批（缺 evidence/低置信度/高危 finding）、
 权限误分类（`spreadsheet.write`、`thread.create`）、超时后隔离与恢复、
-UNKNOWN 不重发、完成事务回滚、终态不可逆、ACP 并发 prompt、
-OpenCode v2 多候选恢复等。
+UNKNOWN 不重发、完成事务回滚、终态不可逆、跨 run dedupe/release 隔离、
+OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选恢复等。
 
 ## 后续（阶段三）
 
 1. 工作流 YAML 化与工作流级断点续跑（当前只恢复消息）。
 2. 跨进程互斥（文件锁）与持久化任务队列。
 3. 角色与品牌解耦、第三/第四个智能体、并行执行（代码写入保持单写者）。
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。

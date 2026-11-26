@@ -4,8 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentorchestrator"
-version = "0.5.1"
-description = "WorkBuddy + OpenCode 双智能体编排器（第一阶段：双向通信）"
+version = "0.6.0"
+description = "Reliable multi-agent orchestrator for local AI development (WorkBuddy / OpenCode / ACP)"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",

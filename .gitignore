@@ -6,6 +6,7 @@ data/
 logs/
 config.yaml
 .env
+workbuddy_oauth_state.json
 *.db
 *.db-wal
 *.db-shm

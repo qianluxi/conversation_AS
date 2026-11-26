@@ -29,7 +29,7 @@ def test_message_roundtrip_and_indexes(store: Store) -> None:
     )
     store.save_message(reply)
 
-    assert store.find_by_dedupe("run:1:oc").message_id == outgoing.message_id
+    assert store.find_by_dedupe(run.run_id, "run:1:oc").message_id == outgoing.message_id
     assert store.find_reply(outgoing.message_id).content == "发现 2 个问题"
     assert [m.message_id for m in store.list_messages(run.run_id)] == [
         outgoing.message_id, reply.message_id,
@@ -69,3 +69,16 @@ def test_run_status_update(store: Store) -> None:
     assert loaded is not None
     assert loaded.status is RunStatus.COMPLETED
     assert loaded.metadata["approved"] is True
+
+def test_dedupe_key_is_scoped_per_run(store: Store) -> None:
+    run_a = store.create_run("a")
+    run_b = store.create_run("b")
+    first = Message(run_id=run_a.run_id, from_agent="orchestrator", to_agent="x",
+                    content="1", dedupe_key="same-key")
+    second = Message(run_id=run_b.run_id, from_agent="orchestrator", to_agent="x",
+                     content="2", dedupe_key="same-key")
+    store.save_message(first)
+    store.save_message(second)
+
+    assert store.find_by_dedupe(run_a.run_id, "same-key").message_id == first.message_id
+    assert store.find_by_dedupe(run_b.run_id, "same-key").message_id == second.message_id

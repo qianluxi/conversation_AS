@@ -97,8 +97,8 @@ CREATE TABLE IF NOT EXISTS run_events (
     UNIQUE (run_id, seq)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedupe
-    ON messages (dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedupe_run
+    ON messages (run_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_run ON messages (run_id, turn_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages (reply_to);
 CREATE INDEX IF NOT EXISTS idx_steps_run ON steps (run_id, turn_id);
@@ -159,6 +159,12 @@ class Store:
             self._ensure_column("runs", "current_turn", "current_turn INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("messages", "attempt", "attempt INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("messages", "last_attempt_at", "last_attempt_at TEXT")
+            # 旧版本使用全局 dedupe_key 唯一索引；迁移为 (run_id, dedupe_key)。
+            self._conn.execute("DROP INDEX IF EXISTS idx_messages_dedupe")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedupe_run"
+                " ON messages (run_id, dedupe_key) WHERE dedupe_key IS NOT NULL"
+            )
 
     def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
@@ -380,10 +386,11 @@ class Store:
             ).fetchone()
         return self._row_to_message(row) if row else None
 
-    def find_by_dedupe(self, dedupe_key: str) -> Message | None:
+    def find_by_dedupe(self, run_id: str, dedupe_key: str) -> Message | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM messages WHERE dedupe_key = ?", (dedupe_key,),
+                "SELECT * FROM messages WHERE run_id = ? AND dedupe_key = ?",
+                (run_id, dedupe_key),
             ).fetchone()
         return self._row_to_message(row) if row else None
 
@@ -441,6 +448,22 @@ class Store:
             ).fetchone()
             if row is None:
                 raise KeyError(f"未知 message_id: {outgoing_message_id}")
+            if row["run_id"] != run_id:
+                raise ValueError(
+                    f"消息 {outgoing_message_id} 不属于 run {run_id}"
+                )
+            if reply.run_id != run_id or reply.reply_to != outgoing_message_id:
+                raise ValueError("回复消息的 run_id/reply_to 与原始消息不一致")
+            if step_id:
+                step_row = self._conn.execute(
+                    "SELECT * FROM steps WHERE step_id = ?", (step_id,),
+                ).fetchone()
+                if step_row is None:
+                    raise KeyError(f"未知 step_id: {step_id}")
+                if step_row["run_id"] != run_id:
+                    raise ValueError(f"step {step_id} 不属于 run {run_id}")
+                if step_row["input_message_id"] not in (None, outgoing_message_id):
+                    raise ValueError(f"step {step_id} 与消息 {outgoing_message_id} 不匹配")
             existing = self._conn.execute(
                 "SELECT 1 FROM messages WHERE reply_to = ?", (outgoing_message_id,),
             ).fetchone()
@@ -475,7 +498,7 @@ class Store:
             if step_id:
                 self._append_event_tx(run_id, "step_completed", phase, step_id, payload)
 
-    def release_message(self, message_id: str, *, reason: str) -> Message:
+    def release_message(self, run_id: str, message_id: str, *, reason: str) -> Message:
         """人工解除一条不确定消息：标记 CANCELLED、收尾 step、写审计事件。"""
         with self._lock, self._conn:
             row = self._conn.execute(
@@ -483,6 +506,8 @@ class Store:
             ).fetchone()
             if row is None:
                 raise KeyError(f"未知 message_id: {message_id}")
+            if row["run_id"] != run_id:
+                raise ValueError(f"消息 {message_id} 不属于 run {run_id}")
             metadata = json.loads(row["metadata"])
             step_id = metadata.get("step_id")
             now = _iso(utc_now())

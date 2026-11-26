@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
-from dataclasses import dataclass, field
+import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,19 @@ def _is_active(handle: RunHandle | None) -> bool:
     return bool(handle and handle.task and not handle.task.done())
 
 
+def is_loopback_host(host: str) -> bool:
+    return host.strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def _basic_password(header: str) -> str | None:
+    try:
+        raw = base64.b64decode(header[6:]).decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+    _user, sep, password = raw.partition(":")
+    return password if sep else None
+
+
 def _json(model: Any) -> Any:
     if model is None:
         return None
@@ -94,11 +109,32 @@ def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[st
     }
 
 
-def create_app(config: AppConfig, store: Store) -> FastAPI:
+def create_app(config: AppConfig, store: Store,
+               auth_token: str | None = None) -> FastAPI:
     app = FastAPI(title="conversation_AS", docs_url="/api/docs", redoc_url=None)
     app.state.config = config
     app.state.store = store
     app.state.handles = {}
+    app.state.auth_token = auth_token
+
+    @app.middleware("http")
+    async def require_auth(request: Request, call_next):
+        token = request.app.state.auth_token
+        if not token:
+            return await call_next(request)
+        header = request.headers.get("authorization", "")
+        supplied = ""
+        if header.startswith("Basic "):
+            supplied = _basic_password(header) or ""
+        elif header.startswith("Bearer "):
+            supplied = header[7:].strip()
+        if not supplied or not secrets.compare_digest(supplied, token):
+            return JSONResponse(
+                {"detail": "Unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="conversation_AS"'},
+            )
+        return await call_next(request)
 
     # ---- pages ------------------------------------------------------------
 

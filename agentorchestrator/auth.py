@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,57 @@ class WorkBuddyAuth:
 
     # ---- oauth flow -------------------------------------------------------
 
+    STATE_TTL_SECONDS = 600
+
+    @property
+    def state_file(self) -> Path:
+        return self.token_file.parent / "workbuddy_oauth_state.json"
+
+    def _save_state(self, state: str) -> None:
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps({
+            "state": state,
+            "created_at": time.time(),
+            "redirect_uri": self.redirect_uri,
+        }, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(self.state_file, 0o600)
+        except OSError:
+            pass
+
+    def _consume_state(self, state: str | None) -> str:
+        if not self.state_file.exists():
+            raise AdapterAuthError(
+                "没有待验证的 OAuth state。请先运行 `auth url` 生成授权链接，"
+                "再带上回调中的 code 和 state 执行 `auth exchange`。"
+            )
+        try:
+            saved = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AdapterAuthError("本地 OAuth state 文件损坏，请重新运行 `auth url`。") from exc
+        created_at = float(saved.get("created_at") or 0)
+        if time.time() - created_at > self.STATE_TTL_SECONDS:
+            try:
+                self.state_file.unlink()
+            except OSError:
+                pass
+            raise AdapterAuthError("OAuth state 已过期（超过 10 分钟），请重新运行 `auth url`。")
+        expected = str(saved.get("state") or "")
+        if not state or not secrets.compare_digest(state, expected):
+            raise AdapterAuthError("OAuth state 不匹配，已拒绝交换 code（可能是 CSRF 或复制错误）。")
+        try:
+            self.state_file.unlink()
+        except OSError:
+            pass
+        return state
+
+    def begin_authorization(self, state: str | None = None) -> tuple[str, str]:
+        """生成授权链接并持久化 state，供 exchange_code 校验。"""
+        chosen = state or secrets.token_urlsafe(24)
+        url = self.build_authorize_url(state=chosen)
+        self._save_state(chosen)
+        return url, chosen
+
     def build_authorize_url(self, state: str | None = None) -> str:
         if not self.client_id or not self.redirect_uri:
             raise AdapterAuthError("缺少 client_id 或 redirect_uri，无法生成授权地址。")
@@ -112,7 +164,8 @@ class WorkBuddyAuth:
         self.save_token(token)
         return token
 
-    async def exchange_code(self, code: str) -> dict[str, Any]:
+    async def exchange_code(self, code: str, state: str | None = None) -> dict[str, Any]:
+        self._consume_state(state)
         return await self._token_request({
             "grant_type": "authorization_code",
             "code": code,

@@ -157,7 +157,7 @@ def test_failed_dedupe_message_can_retry_safely(store: Store) -> None:
                 await conversation.ask("worker", "第一次", dedupe_key="retry-key")
             except AdapterError:
                 pass
-            failed = store.find_by_dedupe("retry-key")
+            failed = store.find_by_dedupe(conversation.run_id, "retry-key")
             first_status = failed.status.value
             reply = await conversation.ask("worker", "第一次", dedupe_key="retry-key")
             return first_status, reply.text
@@ -167,7 +167,7 @@ def test_failed_dedupe_message_can_retry_safely(store: Store) -> None:
     first_status, text = run(scenario())
     assert first_status == "failed"
     assert text
-    stored = store.find_by_dedupe("retry-key")
+    stored = store.find_by_dedupe(conversation.run_id, "retry-key")
     assert stored is not None
     assert stored.status is MessageStatus.COMPLETED
     assert stored.attempt == 2
