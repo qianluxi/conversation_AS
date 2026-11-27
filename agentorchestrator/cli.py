@@ -122,15 +122,20 @@ async def _cmd_run(_config: AppConfig, adapters: dict[str, AgentAdapter],
         return 2
     conversation = Conversation(store, adapters, goal=args.goal)
     workspace = None
+    read_only = False
     for settings in _config.agents.values():
-        if getattr(settings, "type", "") == "opencode" and getattr(settings, "directory", None):
-            workspace = settings.directory
+        if getattr(settings, "type", "") == "opencode":
+            if getattr(settings, "directory", None):
+                workspace = settings.directory
+            if getattr(settings, "agent", None) == "plan":
+                read_only = True
             break
     try:
         result = await run_collaboration(
             conversation, planner=args.planner, worker=args.worker,
             reviewer=args.reviewer, max_rounds=args.max_rounds,
             goal=args.goal, timeout=args.timeout, workspace=workspace,
+            read_only=read_only,
         )
         print(f"\nrun_id = {result['run_id']}")
         print(f"approved = {result['approved']}  rounds = {result['rounds']}")

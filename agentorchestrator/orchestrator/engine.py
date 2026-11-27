@@ -24,6 +24,7 @@ from ..messaging.schema import (
 )
 from ..review import REVIEW_CONTRACT, ReviewParseError, ReviewResult, parse_review_result, review_as_prompt
 from ..storage.database import Store
+from ..verification import capture_workspace, verification_prompt, workspace_changed
 
 
 class Conversation:
@@ -496,7 +497,8 @@ async def run_collaboration(conversation: Conversation, *,
                             planner: str, worker: str, reviewer: str | None = None,
                             max_rounds: int = 2, goal: str = "",
                             timeout: float | None = None,
-                            workspace: str | None = None) -> dict[str, Any]:
+                            workspace: str | None = None,
+                            read_only: bool = False) -> dict[str, Any]:
     """结构化流程：分析 -> 执行 -> 结构化审查；支持从持久化检查点继续。"""
     reviewer = reviewer or planner
     workflow = conversation.get_workflow()
@@ -507,6 +509,7 @@ async def run_collaboration(conversation: Conversation, *,
             "max_rounds": max_rounds, "workspace": workspace,
             "stage": "plan", "round": 0, "plan": "", "work": "",
             "issues": "", "notes": "", "review": "", "review_result": None,
+            "read_only": read_only, "verification": None,
             "created_at": utc_now().isoformat(),
         }
     else:
@@ -518,6 +521,8 @@ async def run_collaboration(conversation: Conversation, *,
         workflow.setdefault("notes", "")
         workflow.setdefault("review", "")
         workflow.setdefault("review_result", None)
+        workflow.setdefault("read_only", read_only)
+        workflow.setdefault("verification", None)
         workflow["goal"] = workflow.get("goal") or goal
         workflow["planner"] = workflow.get("planner") or planner
         workflow["worker"] = workflow.get("worker") or worker
@@ -527,6 +532,8 @@ async def run_collaboration(conversation: Conversation, *,
 
     max_rounds = int(workflow.get("max_rounds") or max_rounds)
     workspace = workflow.get("workspace") or workspace
+    read_only = bool(workflow.get("read_only", read_only))
+    workflow["read_only"] = read_only
     stage = workflow.get("stage") or "plan"
     round_no = int(workflow.get("round") or 0)
     plan = str(workflow.get("plan") or "")
@@ -551,7 +558,7 @@ async def run_collaboration(conversation: Conversation, *,
 
     metadata: dict[str, Any] = {
         "planner": planner, "worker": worker, "reviewer": reviewer,
-        "workspace": workspace,
+        "workspace": workspace, "read_only": read_only,
     }
     workspace_context = ""
     if workspace:
@@ -567,6 +574,8 @@ async def run_collaboration(conversation: Conversation, *,
     review: ReviewResult | None = None
     review_reply: AgentReply | None = None
     work_reply: AgentReply | None = None
+    verification_before = workflow.get("verification_before")
+    verification_after = (workflow.get("verification") or {}).get("after")
 
     try:
         if stage == "plan":
@@ -624,6 +633,8 @@ async def run_collaboration(conversation: Conversation, *,
             stage = workflow.get("stage") or stage
             if stage == "work":
                 conversation.set_phase(RunPhase.EXECUTING)
+                verification_before = capture_workspace(workspace)
+                workflow["verification_before"] = verification_before
                 conversation.save_workflow(workflow, event_type="workflow_node_work")
                 notes = str(workflow.get("notes") or "")
                 resume_note = f"【继续说明】{notes}\n" if notes else ""
@@ -644,16 +655,48 @@ async def run_collaboration(conversation: Conversation, *,
                     role="worker", phase=RunPhase.EXECUTING,
                 )
                 work_text = work_reply.text
-                workflow.update(work=work_text, stage="review", notes="")
+                verification_after = capture_workspace(workspace)
+                changed = workspace_changed(verification_before, verification_after)
+                workflow.update(
+                    work=work_text, stage="review", notes="",
+                    verification={
+                        "before": verification_before,
+                        "after": verification_after,
+                        "changed": changed,
+                    },
+                )
                 conversation.save_workflow(workflow, event_type="workflow_work_saved")
+                if read_only and changed is True:
+                    workflow["stage"] = "failed"
+                    workflow["error"] = "read_only_violation"
+                    conversation.save_workflow(
+                        workflow, event_type="workflow_read_only_violation",
+                    )
+                    conversation.finish(
+                        RunStatus.FAILED, RunPhase.FAILED,
+                        {**metadata, "approved": False, "rounds": round_no,
+                         "reason": "read_only_violation",
+                         "verification": workflow.get("verification")},
+                    )
+                    return {
+                        "run_id": conversation.run_id, "approved": False,
+                        "rounds": round_no, "plan": plan, "work": work_text,
+                        "review": "",
+                        "review_result": None,
+                        "error": "只读任务检测到工作区发生变化，已停止；请检查 git diff。",
+                    }
                 stage = "review"
 
             conversation.set_phase(RunPhase.REVIEWING)
+            verification_text = verification_prompt(
+                verification_before, verification_after,
+            )
             conversation.save_workflow(workflow, event_type="workflow_node_review")
             review_reply = await conversation.ask(
                 reviewer,
                 "你是审查者。请结合任务方案与执行结果进行审查。\n"
                 f"{workspace_context}"
+                f"{verification_text}"
                 "只检查执行结果是否满足既定方案，不要提出方案之外的新要求；"
                 "若满足方案且证据充分，应判定 approved。方案中对仓库现状的断言不一定为真，"
                 "请以执行结果中的实际证据为准。如果工作目录已提供，而执行结果声称"

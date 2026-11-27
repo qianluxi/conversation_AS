@@ -13,8 +13,12 @@ from conftest import FakeAuth, run
 from fake_servers import FakeWorkBuddyHandler, LocalServer
 
 
-def _settings(url: str, *, timeout: float = 5) -> WorkBuddyLocalSettings:
-    return WorkBuddyLocalSettings(base_url=url, poll_interval=0.01, timeout=timeout)
+def _settings(url: str, *, timeout: float = 5,
+              lock_file: str | None = None) -> WorkBuddyLocalSettings:
+    options = dict(base_url=url, poll_interval=0.01, timeout=timeout)
+    if lock_file:
+        options["lock_file"] = lock_file
+    return WorkBuddyLocalSettings(**options)
 
 
 class ToggleReplyHandler(FakeWorkBuddyHandler):
@@ -126,3 +130,32 @@ def test_remote_abort_is_explicitly_unsupported(tmp_path: Path) -> None:
                 await adapter.aclose()
 
         run(scenario())
+
+def test_cross_process_lock_blocks_second_adapter(tmp_path: Path) -> None:
+    with LocalServer(FakeWorkBuddyHandler) as server:
+        lock_file = tmp_path / "assistant.lock"
+        first = WorkBuddyLocalAdapter(
+            "wb1", _settings(server.url, lock_file=str(lock_file)), auth=FakeAuth(),
+            gate=LocalAssistantGate(),
+        )
+        second = WorkBuddyLocalAdapter(
+            "wb2", _settings(server.url, lock_file=str(lock_file)), auth=FakeAuth(),
+            gate=LocalAssistantGate(),
+        )
+
+        async def scenario() -> str:
+            ref = await first.send_message("workbuddy-local", "第一条")
+            error = ""
+            try:
+                await second.send_message("workbuddy-local", "第二条")
+            except AdapterError as exc:
+                error = str(exc)
+            await first.wait_response(ref, timeout=5)
+            ref2 = await second.send_message("workbuddy-local", "第三条")
+            await second.wait_response(ref2, timeout=5)
+            await first.aclose()
+            await second.aclose()
+            return error
+
+        error = run(scenario())
+        assert "另一个协调器进程" in error

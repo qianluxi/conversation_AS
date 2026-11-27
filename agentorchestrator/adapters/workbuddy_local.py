@@ -11,6 +11,7 @@ import httpx
 
 from ..auth import WorkBuddyAuth
 from ..config import WorkBuddyLocalSettings
+from ..locks import CrossProcessFileLock, CrossProcessLockError
 from .base import (
     AdapterAuthError,
     AdapterError,
@@ -93,6 +94,7 @@ class WorkBuddyLocalAdapter(AgentAdapter):
         if gate is None:
             gate = LocalAssistantGate(lock=lock or asyncio.Lock())
         self._gate = gate
+        self._file_lock = CrossProcessFileLock(settings.lock_file)
 
     # ---- http -------------------------------------------------------------
 
@@ -189,6 +191,10 @@ class WorkBuddyLocalAdapter(AgentAdapter):
                     f"WorkBuddy 本地助理正在处理 {self._gate.message_id or '上一轮任务'}"
                     f"（{self._gate.phase.value}），禁止并发发送。"
                 )
+            try:
+                self._file_lock.acquire()
+            except CrossProcessLockError as exc:
+                raise AdapterError(str(exc)) from exc
             self._set_gate(LocalAssistantPhase.SUBMITTED)
 
         try:
@@ -203,6 +209,7 @@ class WorkBuddyLocalAdapter(AgentAdapter):
             await self._mark(LocalAssistantPhase.QUARANTINED, reason=str(exc))
             raise
         except BaseException:
+            self._file_lock.release()
             await self._mark(LocalAssistantPhase.IDLE)
             raise
 
@@ -231,6 +238,7 @@ class WorkBuddyLocalAdapter(AgentAdapter):
                         else:
                             parts.extend(str(piece) for piece in content)
                     last_text = "\n".join(part for part in parts if part).strip()
+                    self._file_lock.release()
                     await self._mark(LocalAssistantPhase.IDLE)
                     return AgentReply(
                         session_id=ref.session_id,
@@ -278,6 +286,7 @@ class WorkBuddyLocalAdapter(AgentAdapter):
                 parts.append(content)
             else:
                 parts.extend(str(piece) for piece in content)
+        self._file_lock.release()
         await self._mark(LocalAssistantPhase.IDLE)
         return AgentReply(
             session_id=session_id, text="\n".join(part for part in parts if part).strip(),
@@ -306,6 +315,7 @@ class WorkBuddyLocalAdapter(AgentAdapter):
                 "必要时使用 --force 强制解除隔离（可能导致上一轮回复丢失）。"
             )
         await self._mark(LocalAssistantPhase.IDLE)
+        self._file_lock.release()
         log.warning("已人工强制解除 WorkBuddy 本地助理隔离。")
         return True
 
@@ -324,6 +334,7 @@ class WorkBuddyLocalAdapter(AgentAdapter):
         await self.cancel_wait(session_id)
 
     async def aclose(self) -> None:
+        self._file_lock.release()
         if self._owns_client and self._client is not None:
             await self._client.aclose()
         await self._auth.aclose()

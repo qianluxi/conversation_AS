@@ -189,6 +189,7 @@ class WorkBuddyLocalSettings(BaseModel):
     timeout: float = 300.0
     poll_interval: float = 2.0
     verify_ssl: bool = True
+    lock_file: str = "data/workbuddy_local.lock"
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
 
 

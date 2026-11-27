@@ -301,6 +301,7 @@ def create_app(config: AppConfig, store: Store,
             "opencode_agent": payload.opencode_agent,
             "max_rounds": payload.max_rounds,
             "timeout": payload.timeout,
+            "read_only": payload.opencode_agent == "plan",
         })
         conversation._refresh()
 
@@ -312,6 +313,7 @@ def create_app(config: AppConfig, store: Store,
                     reviewer=payload.reviewer, max_rounds=payload.max_rounds,
                     goal=payload.goal, timeout=payload.timeout,
                     workspace=directory,
+                    read_only=payload.opencode_agent == "plan",
                 )
             except Exception as exc:  # noqa: BLE001 - 记录到 UI
                 handle.error = f"{type(exc).__name__}: {exc}"
@@ -395,6 +397,9 @@ def create_app(config: AppConfig, store: Store,
             )
         max_rounds = int(parent.metadata.get("max_rounds")
                          or workflow.get("max_rounds") or 2)
+        read_only = bool(parent.metadata.get("read_only")
+                         or workflow.get("read_only")
+                         or agent_name == "plan")
         metadata = {
             **conversation.run.metadata,
             "parent_run_id": run_id,
@@ -403,6 +408,7 @@ def create_app(config: AppConfig, store: Store,
             "opencode_agent": agent_name,
             "max_rounds": max_rounds,
             "timeout": parent.metadata.get("timeout"),
+            "read_only": read_only,
             "workflow": new_workflow,
         }
         store.update_run(conversation.run_id, metadata=metadata)
@@ -423,7 +429,7 @@ def create_app(config: AppConfig, store: Store,
                     conversation,
                     planner=planner, worker=worker, reviewer=reviewer,
                     max_rounds=max_rounds, goal=goal, timeout=timeout,
-                    workspace=workspace,
+                    workspace=workspace, read_only=read_only,
                 )
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"

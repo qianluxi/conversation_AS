@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.7.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.8.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -169,12 +169,24 @@ IDLE → SUBMITTED → RUNNING → IDLE
 ```
 
 - 同一 `base_url` 的所有适配器共享一个 `LocalAssistantGate`；
+- 同一 `base_url` 还会使用 `lock_file` 跨进程互斥，防止两个协调器同时操作
+  同一个本地助理；
 - 等待超时**不释放**远端占用，而是进入 `QUARANTINED`，新消息被立即拒绝；
 - `recover_reply()` 查到回复才自动解除；否则需要
   `release --force` 人工确认；
 - 跨 run 保护：只要数据库里存在 `workbuddy_local` 的未确认消息，`ask()` 就会拒绝；
 - 三种取消语义：`cancel_wait()`（只停本地）、`remote_abort()`（不支持，明确抛错）、
   `cancel()`（保守等于 `cancel_wait()`）。
+
+### 5.1 独立工作区证据与只读保护
+
+协调器在 Worker 前后独立执行 `git HEAD / status / diff` 快照，并把
+“协调器实测工作区”写入 Reviewer 提示词和 `workflow.verification`。这不依赖
+模型自报的证据。
+
+当 OpenCode 执行角色为 `plan`（只读）时，如果前后快照发生变化（修改、删除、
+新增文件或新 commit），协调器会直接判定运行失败，原因
+`read_only_violation`，不会进入审查。
 
 ### 6. 工具权限：token/能力匹配
 
@@ -337,7 +349,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 76 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 82 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）
@@ -370,8 +382,8 @@ OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选�
 
 - Planner/Reviewer（WorkBuddy）没有文件系统访问能力，可能误判仓库现状；
   Planner 也可能把“读取 README 第一行”误解成“重写 README”。
-- Reviewer 的 evidence 是模型自报，协调器尚未独立执行测试或核对 git diff，
-  因此它是结构化 AI 审查，不是完整质量门禁。
+- Reviewer 现在会拿到协调器独立采集的 git HEAD/status/diff 快照，但尚未替用户
+  执行测试命令或 CI；它仍是“结构化 AI 审查 + 工作区证据”，不是完整质量门禁。
 - “只读/不要修改”写在任务目标里只是提示；真正的只读边界是把 OpenCode
   执行角色设为 `plan`。
 - 继续任务会创建新 run，不会原地重开已失败的 terminal run；若要“同 run 续跑”
@@ -389,3 +401,5 @@ OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选�
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
+
+真实接口兼容性记录见 [docs/INTEGRATION_LOG.md](docs/INTEGRATION_LOG.md)。

@@ -26,6 +26,7 @@ agents:
   #   token_file: data/workbuddy_token.json
   #   timeout: 300
   #   poll_interval: 2
+  #   lock_file: data/workbuddy_local.lock
 
   # 官方 OAuth 云端任务（ACP：SSE + JSON-RPC 2.0）
   # workbuddy_acp:

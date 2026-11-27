@@ -146,6 +146,10 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 选择工作目录后，协调器会把“当前工作目录”写入 Planner/Worker/Reviewer 的提示：
 “检查代码/项目”时不需要再粘贴代码，执行者应在该目录内直接使用工具检查。
 
+协调器还会在 Worker 前后独立执行 `git HEAD/status/diff` 快照，并把结果写入
+Reviewer 提示词（独立证据）。当执行角色是 `plan` 时，如果快照发生变化（修改、
+新增、删除文件或新 commit），本次运行会以 `read_only_violation` 失败，不进入审查。
+
 另外：Planner 也看不到文件，只能根据目标写方案，可能误判仓库现状。如果只是读取
 某个文件/变量，请在目标里写清楚文件名与期望输出，或把执行角色设为 `plan` 并在
 审查意见中纠正。
@@ -222,6 +226,8 @@ python -m agentorchestrator --config config.yaml send --agent workbuddy --text "
 - 本地助理没有独立 session，也没有远端取消接口；
 - 同一 `base_url` 的所有任务共享一个远端状态门：
   `idle → submitted → running → idle`，异常进入 `quarantined`；
+- 同一 `base_url` 还使用 `lock_file` 跨进程互斥（默认
+  `data/workbuddy_local.lock`），两个协调器进程不能同时提交；
 - 超时后**不会**自动允许下一条消息，必须核对远端或人工释放（见第 8 节）。
 
 ### 5.4 云端任务 ACP（`workbuddy_acp`）
@@ -535,16 +541,19 @@ asyncio.run(main())
 
 ## 12. 已知限制
 
-- 同一时刻建议只运行一个协调器进程；本地助理的互斥是进程内共享门，
-  跨进程需要额外的文件锁/任务队列（后续版本）。
+- 本地助理已用 `lock_file` 做跨进程互斥；跨进程任务队列仍未实现。
 - `resume` 只核对/补齐消息；要按节点继续工作流，请用界面的「继续此任务」。
 - ACP 重启后无法唯一关联历史轮次，会保留 `unknown`。
-- OpenCode 的工具权限由 OpenCode 自行控制，本协调器不做拦截。
+- OpenCode 的工具权限由 OpenCode 自行控制；只读任务通过 `plan` + git 快照做
+  事后保护，不是系统级沙箱。
 - 远端 `create_session` 在结果不确定时不会写入消息记录，需要人工确认会话是否创建。
+- Reviewer 已有独立 git 证据，但协调器尚未自动执行测试/CI；完整质量门禁仍是后续工作。
 
 ---
 
 ## 13. 最小验收清单
+
+> 真实接口兼容性记录见 [INTEGRATION_LOG.md](INTEGRATION_LOG.md)。
 
 ```powershell
 python -m pytest -q                       # 全绿
