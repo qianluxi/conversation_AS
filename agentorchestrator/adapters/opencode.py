@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ from .base import (
     MessageRef,
     translate_transport_error,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -276,6 +280,11 @@ class OpenCodeAdapter(AgentAdapter):
                 return reply
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
+                # 超时后尽量中止远端，避免挂起的工具/长驻命令一直占着会话
+                try:
+                    await self.cancel(pending.session_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("超时后中止 OpenCode 会话失败：%s", exc)
                 raise AdapterTimeout(
                     f"等待 OpenCode 响应超时（{limit}s）。已收到的内容：{partial[:300]}"
                 )

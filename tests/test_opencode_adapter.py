@@ -4,7 +4,9 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
+from agentorchestrator.adapters.base import AdapterTimeout
 from agentorchestrator.adapters.opencode import OpenCodeAdapter
 from agentorchestrator.config import OpencodeSettings
 
@@ -152,3 +154,40 @@ def test_list_models_never_leaks_provider_keys() -> None:
     assert data["models"][0]["configured"] is True
     assert data["models"][0]["model_name"] == "Model One"
     assert data["models"][1]["configured"] is False
+
+def test_wait_timeout_aborts_remote_session() -> None:
+    state: dict[str, Any] = {"messages": [], "aborted": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/session":
+            return httpx.Response(200, json={"id": "ses_to"})
+        if path == "/session/ses_to/prompt_async":
+            body = json.loads(request.content)
+            state["messages"] = [
+                {"info": {"id": body["messageID"], "sessionID": "ses_to", "role": "user",
+                          "time": {"created": 1000}},
+                 "parts": [{"type": "text", "text": "hi"}]},
+                {"info": {"id": "msg_a", "sessionID": "ses_to", "role": "assistant",
+                          "parentID": body["messageID"], "time": {"created": 2000}},
+                 "parts": [{"type": "tool", "tool": "bash", "state": {"status": "running"}}]},
+            ]
+            return httpx.Response(204)
+        if path == "/session/ses_to/message":
+            return httpx.Response(200, json=state["messages"])
+        if path == "/session/ses_to/abort":
+            state["aborted"] = True
+            return httpx.Response(200, json=True)
+        return httpx.Response(404, json={"error": path})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter("oc", _settings(), client=client)
+            session_id = await adapter.create_session("run-to")
+            ref = await adapter.send_message(session_id, "hi")
+            with pytest.raises(AdapterTimeout):
+                await adapter.wait_response(ref, timeout=0.15)
+
+    run(scenario())
+    assert state["aborted"] is True

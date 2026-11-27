@@ -64,7 +64,7 @@ agents:
     # agent: build   # build 可修改代码；plan 只读检查（界面可按次覆盖）
     # provider_id: opencode-go
     # model_id: deepseek-v4.1-flash
-    timeout: 300
+    timeout: 600
     poll_interval: 1
 
   # 离线演示/测试用，不访问网络

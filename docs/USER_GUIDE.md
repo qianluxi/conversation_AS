@@ -402,6 +402,10 @@ python -m agentorchestrator --config config.yaml pending
 python -m agentorchestrator --config config.yaml events --run-id <id>
 ```
 
+生成类任务常见情况：文件其实已经写入工作目录，但模型还在跑验证命令，导致等待超时。
+先检查工作目录和时间戳，再决定是否释放。OpenCode 超时后协调器会尝试中止远端会话；
+默认超时已调整为 600 秒，可在界面「超时」中按任务调大。
+
 处理：
 
 ```powershell
