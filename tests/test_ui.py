@@ -59,6 +59,7 @@ def test_ui_page_and_mock_run(tmp_path: Path) -> None:
             assert data["run"]["status"] == "completed"
             assert data["run"]["phase"] == "completed"
             assert data["run"]["metadata"]["approved"] is True
+            assert "执行完成" in data["final_output"]
             assert any(message["from_agent"] == "worker" for message in data["messages"])
             assert data["steps"] and all(step["state"] == "completed" for step in data["steps"])
 

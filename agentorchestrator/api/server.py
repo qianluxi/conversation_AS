@@ -105,6 +105,9 @@ def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[st
     last_error = next((message.error for message in reversed(messages) if message.error), None)
     if not last_error:
         last_error = run.metadata.get("error") or run.metadata.get("reason")
+    worker_name = run.metadata.get("worker")
+    worker_replies = [m for m in messages if worker_name and m.from_agent == worker_name]
+    final_output = worker_replies[-1].content if worker_replies else ""
     return {
         "run": _json(run),
         "steps": [_json(step) for step in store.list_steps(run_id)],
@@ -113,6 +116,7 @@ def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[st
         "active": _is_active(handle),
         "error": handle.error if handle else None,
         "last_error": last_error,
+        "final_output": final_output,
         "result": handle.result if handle else None,
     }
 

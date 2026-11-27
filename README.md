@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.6.3`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.6.4`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -71,6 +71,7 @@ start.bat --port 8766 --token my-password
   模型默认优先选择已配置的 `opencode-go` 模型，避免默认模型鉴权失败；
 - **OpenCode 执行角色**：`plan`（只读检查，默认）/ `build`（可修改代码）；
 - 点击「开始协作」后实时查看运行状态、步骤耗时、消息全文、状态机事件；
+- **执行结果 / 最终交付物**置顶显示（可一键复制）；审查卡只显示判定，不重复正文；
 - 结构化审查结果（结论、findings、evidence、confidence）；
 - 待处理/隔离消息的「核对恢复」与「强制释放」；
 - 历史运行列表，点击回看。
