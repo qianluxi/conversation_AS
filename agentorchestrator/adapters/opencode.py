@@ -122,6 +122,10 @@ class OpenCodeAdapter(AgentAdapter):
         response = await self._request("GET", "/path", timeout=10)
         return response.json()
 
+    async def get_session(self, session_id: str) -> dict[str, Any]:
+        response = await self._request("GET", f"/session/{session_id}", timeout=15)
+        return response.json()
+
     async def list_models(self) -> dict[str, Any]:
         """返回已配置/可用的 provider/model 列表（绝不包含 API key）。"""
         response = await self._request("GET", "/config/providers", timeout=20)

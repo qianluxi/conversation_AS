@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from agentorchestrator.api.server import create_app
 from agentorchestrator.config import AppConfig, MockSettings, StorageSettings
+from agentorchestrator.messaging.schema import RunPhase, RunStatus
 from agentorchestrator.storage.database import Store
 
 
@@ -129,5 +130,88 @@ def test_start_rejects_missing_opencode_directory(tmp_path: Path) -> None:
             })
             assert response.status_code == 400
             assert "工作目录不存在" in response.json()["detail"]
+    finally:
+        store.close()
+
+def test_continue_from_workflow_checkpoint(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.storage.path)
+    parent = store.create_run("检查代码")
+    store.update_run(
+        parent.run_id, status=RunStatus.FAILED, phase=RunPhase.FAILED,
+        metadata={
+            "planner": "planner", "worker": "worker", "reviewer": "planner",
+            "max_rounds": 2,
+            "workflow": {
+                "goal": "检查代码", "planner": "planner", "worker": "worker",
+                "reviewer": "planner", "max_rounds": 2, "workspace": None,
+                "stage": "review", "round": 1, "plan": "任务方案",
+                "work": "执行完成", "issues": "", "notes": "",
+                "review": "", "review_result": None,
+            },
+        },
+    )
+    app = create_app(config, store)
+    try:
+        with TestClient(app) as client:
+            response = client.post(f"/api/runs/{parent.run_id}/continue", json={})
+            assert response.status_code == 200
+            child_id = response.json()["run_id"]
+            assert response.json()["parent_run_id"] == parent.run_id
+
+            data = {}
+            for _ in range(200):
+                data = client.get(f"/api/runs/{child_id}").json()
+                if not data["active"]:
+                    break
+                time.sleep(0.05)
+
+            assert data["run"]["status"] == "completed"
+            assert data["run"]["metadata"]["approved"] is True
+            assert data["run"]["metadata"]["parent_run_id"] == parent.run_id
+            assert data["run"]["metadata"]["workflow"]["stage"] == "done"
+            assert [step["role"] for step in data["steps"]] == ["reviewer"]
+    finally:
+        store.close()
+
+
+def test_continue_unknown_work_requires_confirmation(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.storage.path)
+    parent = store.create_run("检查代码")
+    store.update_run(
+        parent.run_id, status=RunStatus.FAILED, phase=RunPhase.FAILED,
+        metadata={
+            "planner": "planner", "worker": "worker", "reviewer": "planner",
+            "max_rounds": 2,
+            "workflow": {
+                "goal": "检查代码", "planner": "planner", "worker": "worker",
+                "reviewer": "planner", "max_rounds": 2, "workspace": None,
+                "stage": "work", "round": 1, "plan": "任务方案",
+                "work": "", "issues": "", "notes": "",
+                "review": "", "review_result": None,
+            },
+        },
+    )
+    app = create_app(config, store)
+    try:
+        with TestClient(app) as client:
+            blocked = client.post(f"/api/runs/{parent.run_id}/continue", json={})
+            assert blocked.status_code == 409
+            assert "retry_unknown" in blocked.json()["detail"]
+
+            response = client.post(
+                f"/api/runs/{parent.run_id}/continue",
+                json={"retry_unknown": True},
+            )
+            assert response.status_code == 200
+            data = {}
+            for _ in range(200):
+                data = client.get(f"/api/runs/{response.json()['run_id']}").json()
+                if not data["active"]:
+                    break
+                time.sleep(0.05)
+            assert data["run"]["status"] == "completed"
+            assert data["run"]["metadata"]["workflow"]["stage"] == "done"
     finally:
         store.close()

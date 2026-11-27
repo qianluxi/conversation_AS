@@ -47,6 +47,11 @@ class ReleaseRequest(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
 
 
+class ContinueRequest(BaseModel):
+    retry_unknown: bool = False
+    instruction: str | None = None
+
+
 @dataclass
 class RunHandle:
     run_id: str
@@ -97,6 +102,38 @@ def _apply_opencode_overrides(adapters: dict[str, Any], spec: str | None,
             adapter.settings = adapter.settings.model_copy(update=updates)
 
 
+def _derive_workflow(store: Store, run: Any) -> dict[str, Any]:
+    """为没有 workflow 元数据的旧 run 推导检查点。"""
+    messages = store.list_messages(run.run_id)
+    metadata = run.metadata or {}
+    planner = metadata.get("planner") or "planner"
+    worker = metadata.get("worker") or "worker"
+    reviewer = metadata.get("reviewer") or planner
+    plan = ""
+    work = ""
+    round_no = 0
+    for message in messages:
+        if (message.from_agent == planner and message.reply_to
+                and message.turn_id == 0 and not plan):
+            plan = message.content
+        if message.from_agent == worker and message.reply_to:
+            work = message.content
+            round_no = max(round_no, message.turn_id)
+    if plan:
+        round_no = max(1, round_no)
+    stage = "plan" if not plan else ("review" if work else "work")
+    if run.status.value == "completed":
+        stage = "done"
+    return {
+        "goal": run.goal, "planner": planner, "worker": worker, "reviewer": reviewer,
+        "max_rounds": int(metadata.get("max_rounds") or 2),
+        "workspace": metadata.get("workspace") or metadata.get("opencode_directory"),
+        "stage": stage, "round": round_no, "plan": plan, "work": work,
+        "issues": "", "notes": "", "review": "", "review_result": None,
+        "derived": True,
+    }
+
+
 def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[str, Any]:
     run = store.get_run(run_id)
     if run is None:
@@ -108,8 +145,10 @@ def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[st
     worker_name = run.metadata.get("worker")
     worker_replies = [m for m in messages if worker_name and m.from_agent == worker_name]
     final_output = worker_replies[-1].content if worker_replies else ""
+    workflow = run.metadata.get("workflow") or _derive_workflow(store, run)
     return {
         "run": _json(run),
+        "workflow": workflow,
         "steps": [_json(step) for step in store.list_steps(run_id)],
         "messages": [_json(message) for message in messages],
         "events": [_json(event) for event in store.list_events(run_id, limit=150)],
@@ -255,6 +294,15 @@ def create_app(config: AppConfig, store: Store,
 
         handle = RunHandle(run_id=conversation.run_id)
         request.app.state.handles[handle.run_id] = handle
+        store.update_run(conversation.run_id, metadata={
+            **conversation.run.metadata,
+            "workspace": directory,
+            "opencode_model": payload.opencode_model,
+            "opencode_agent": payload.opencode_agent,
+            "max_rounds": payload.max_rounds,
+            "timeout": payload.timeout,
+        })
+        conversation._refresh()
 
         async def runner() -> None:
             try:
@@ -273,6 +321,118 @@ def create_app(config: AppConfig, store: Store,
 
         handle.task = asyncio.create_task(runner(), name=f"run-{handle.run_id}")
         return {"run_id": handle.run_id}
+
+    @app.post("/api/runs/{run_id}/continue")
+    async def continue_run(run_id: str, payload: ContinueRequest | None,
+                           request: Request) -> dict[str, str]:
+        _ensure_not_active(request, run_id)
+        cfg: AppConfig = request.app.state.config
+        store: Store = request.app.state.store
+        parent = store.get_run(run_id)
+        if parent is None:
+            raise HTTPException(404, f"未知 run_id: {run_id}")
+        workflow = dict((parent.metadata or {}).get("workflow")
+                        or _derive_workflow(store, parent))
+        stage = workflow.get("stage")
+        if stage not in ("plan", "work", "review"):
+            raise HTTPException(409, f"没有可继续的检查点（stage={stage or 'unknown'}）")
+        options = payload or ContinueRequest()
+        if stage == "work" and not workflow.get("work") and not options.retry_unknown:
+            raise HTTPException(
+                409,
+                "上次执行结果未知。确认要重试当前执行节点后，使用 retry_unknown=true。",
+            )
+        if stage == "work" and workflow.get("work"):
+            stage = "review"
+
+        goal = parent.goal
+        if options.instruction:
+            goal = f"{goal}\n【继续说明】{options.instruction}"
+        workspace = (parent.metadata.get("workspace")
+                     or parent.metadata.get("opencode_directory")
+                     or workflow.get("workspace"))
+        adapters = build_adapters(cfg)
+        model_spec = parent.metadata.get("opencode_model")
+        agent_name = parent.metadata.get("opencode_agent")
+        if not model_spec or not agent_name:
+            # 旧 run 没有保存模型/角色：从它的 OpenCode 会话推断
+            opencode_adapter = next(
+                (adapter for adapter in adapters.values()
+                 if getattr(adapter, "kind", "") == "opencode"),
+                None,
+            )
+            worker_name = parent.metadata.get("worker") or "opencode"
+            binding = store.get_binding(parent.run_id, worker_name)
+            if opencode_adapter is not None and binding is not None:
+                try:
+                    session = await opencode_adapter.get_session(binding.provider_session_id)
+                    agent_name = agent_name or session.get("agent")
+                    model = session.get("model") or {}
+                    if not model_spec and model.get("providerID") and model.get("id"):
+                        model_spec = f"{model['providerID']}/{model['id']}"
+                except Exception as exc:  # noqa: BLE001 - 推断失败则用配置默认
+                    log.warning("无法从父 run 会话推断模型/角色：%s", exc)
+        _apply_opencode_overrides(adapters, model_spec, workspace, agent_name)
+        try:
+            conversation = Conversation(store, adapters, goal=goal)
+        except Exception:
+            for adapter in adapters.values():
+                await adapter.aclose()
+            raise
+
+        new_workflow = dict(workflow)
+        new_workflow.update({
+            "parent_run_id": run_id,
+            "goal": goal,
+            "workspace": workspace,
+            "stage": stage,
+        })
+        if options.instruction:
+            new_workflow["notes"] = options.instruction
+        elif stage == "work" and not new_workflow.get("work"):
+            new_workflow["notes"] = (
+                "继续上次未完成的工作；先检查工作目录中已有产物，避免重复创建或覆盖。"
+            )
+        max_rounds = int(parent.metadata.get("max_rounds")
+                         or workflow.get("max_rounds") or 2)
+        metadata = {
+            **conversation.run.metadata,
+            "parent_run_id": run_id,
+            "workspace": workspace,
+            "opencode_model": model_spec,
+            "opencode_agent": agent_name,
+            "max_rounds": max_rounds,
+            "timeout": parent.metadata.get("timeout"),
+            "workflow": new_workflow,
+        }
+        store.update_run(conversation.run_id, metadata=metadata)
+        conversation._refresh()
+
+        handle = RunHandle(run_id=conversation.run_id)
+        request.app.state.handles[handle.run_id] = handle
+        planner = workflow.get("planner") or parent.metadata.get("planner")
+        worker = workflow.get("worker") or parent.metadata.get("worker")
+        reviewer = workflow.get("reviewer") or parent.metadata.get("reviewer")
+        if not planner or not worker:
+            raise HTTPException(409, "父 run 缺少 planner/worker 信息，无法继续")
+        timeout = parent.metadata.get("timeout")
+
+        async def runner() -> None:
+            try:
+                handle.result = await run_collaboration(
+                    conversation,
+                    planner=planner, worker=worker, reviewer=reviewer,
+                    max_rounds=max_rounds, goal=goal, timeout=timeout,
+                    workspace=workspace,
+                )
+            except Exception as exc:  # noqa: BLE001
+                handle.error = f"{type(exc).__name__}: {exc}"
+                log.exception("continued run %s failed", handle.run_id)
+            finally:
+                await conversation.close()
+
+        handle.task = asyncio.create_task(runner(), name=f"run-{handle.run_id}")
+        return {"run_id": handle.run_id, "parent_run_id": run_id}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request) -> dict[str, Any]:

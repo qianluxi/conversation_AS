@@ -309,6 +309,20 @@ class Conversation:
 
     # ---- recovery ---------------------------------------------------------
 
+    def get_workflow(self) -> dict[str, Any]:
+        return dict(self.run.metadata.get("workflow") or {})
+
+    def save_workflow(self, workflow: dict[str, Any],
+                      *, event_type: str = "workflow_checkpoint") -> None:
+        metadata = dict(self.run.metadata)
+        metadata["workflow"] = workflow
+        self.store.update_run(self.run_id, metadata=metadata)
+        self._refresh()
+        self.event(event_type, payload={
+            "stage": workflow.get("stage"),
+            "round": workflow.get("round"),
+        })
+
     async def resume(self, *, timeout: float | None = None,
                      allow_resend_unstarted: bool = False) -> list[dict[str, Any]]:
         """核对未完成消息的外部状态；默认绝不重发可能已执行的消息。"""
@@ -483,10 +497,62 @@ async def run_collaboration(conversation: Conversation, *,
                             max_rounds: int = 2, goal: str = "",
                             timeout: float | None = None,
                             workspace: str | None = None) -> dict[str, Any]:
-    """结构化流程：分析 -> 执行 -> 结构化审查，失败则回退给执行者。"""
+    """结构化流程：分析 -> 执行 -> 结构化审查；支持从持久化检查点继续。"""
     reviewer = reviewer or planner
-    metadata: dict[str, Any] = {"planner": planner, "worker": worker, "reviewer": reviewer,
-                                "workspace": workspace}
+    workflow = conversation.get_workflow()
+    resuming = bool(workflow)
+    if not workflow:
+        workflow = {
+            "goal": goal, "planner": planner, "worker": worker, "reviewer": reviewer,
+            "max_rounds": max_rounds, "workspace": workspace,
+            "stage": "plan", "round": 0, "plan": "", "work": "",
+            "issues": "", "notes": "", "review": "", "review_result": None,
+            "created_at": utc_now().isoformat(),
+        }
+    else:
+        workflow.setdefault("stage", "plan")
+        workflow.setdefault("round", 0)
+        workflow.setdefault("plan", "")
+        workflow.setdefault("work", "")
+        workflow.setdefault("issues", "")
+        workflow.setdefault("notes", "")
+        workflow.setdefault("review", "")
+        workflow.setdefault("review_result", None)
+        workflow["goal"] = workflow.get("goal") or goal
+        workflow["planner"] = workflow.get("planner") or planner
+        workflow["worker"] = workflow.get("worker") or worker
+        workflow["reviewer"] = workflow.get("reviewer") or reviewer
+        workflow["max_rounds"] = int(workflow.get("max_rounds") or max_rounds)
+        workflow["workspace"] = workflow.get("workspace") or workspace
+
+    max_rounds = int(workflow.get("max_rounds") or max_rounds)
+    workspace = workflow.get("workspace") or workspace
+    stage = workflow.get("stage") or "plan"
+    round_no = int(workflow.get("round") or 0)
+    plan = str(workflow.get("plan") or "")
+    work_text = str(workflow.get("work") or "")
+    issues = str(workflow.get("issues") or "")
+
+    # 规范化中断状态：工作已完成则进入审查；没有工作结果则回到执行。
+    if stage == "plan" and plan:
+        stage = "work"
+        workflow["stage"] = "work"
+    if stage == "work" and work_text:
+        stage = "review"
+        workflow["stage"] = "review"
+    if stage == "review" and not work_text:
+        stage = "work"
+        workflow["stage"] = "work"
+    if stage in ("done", "blocked", "failed", "max_rounds"):
+        raise RuntimeError(f"workflow 已结束（stage={stage}），不能继续")
+    if stage == "work" and round_no <= 0:
+        round_no = 1
+        workflow["round"] = 1
+
+    metadata: dict[str, Any] = {
+        "planner": planner, "worker": worker, "reviewer": reviewer,
+        "workspace": workspace,
+    }
     workspace_context = ""
     if workspace:
         workspace_context = (
@@ -494,53 +560,96 @@ async def run_collaboration(conversation: Conversation, *,
             "代码就在该目录；用户说“检查代码/审查项目”时，"
             "不要要求用户粘贴代码或等待补充，直接在该目录检查。\n"
         )
-    try:
-        conversation.set_phase(RunPhase.ANALYZING)
-        plan_reply = await conversation.ask(
-            planner,
-            "你是需求分析与方案设计者。请针对下面的协作任务形成可执行的任务方案。\n"
-            f"任务：{goal}\n"
-            f"{workspace_context}"
-            "要求：\n"
-            "- 你无法访问文件系统或执行命令，不要猜测仓库内容，也不要假设 README/代码现状；\n"
-            "- 但执行者可以访问上述工作目录；检查代码任务应在方案中明确要求执行者在"
-            "该目录读取文件/运行 git，并给出实际证据；\n"
-            "- 不要写“等待用户提供代码”，也不要向用户提问或要求确认；\n"
-            "- 只给出步骤、检查项、期望结果与判定标准；\n"
-            "- 如果任务很简单（例如只输出一行文本），方案必须保持极简，"
-            "不要扩展交付物、检查清单或额外字段；\n"
-            "- 只做方案，不要修改代码。\n"
-            "输出：目标、检查项、期望结果、约束。",
-            turn_id=0, timeout=timeout, dedupe_key=f"{conversation.run_id}:0:{planner}",
-            role="planner", phase=RunPhase.ANALYZING,
-        )
-        plan = plan_reply.text
-        issues = ""
-        work_reply: AgentReply | None = None
-        review_reply: AgentReply | None = None
-        review: ReviewResult | None = None
-        rounds = 0
+    conversation.save_workflow(
+        workflow, event_type="workflow_resumed" if resuming else "workflow_created",
+    )
 
-        for round_no in range(1, max_rounds + 1):
-            rounds = round_no
-            conversation.set_phase(RunPhase.EXECUTING)
-            work_reply = await conversation.ask(
-                worker,
-                "你是任务执行者。请严格依据任务方案完成工作。\n"
+    review: ReviewResult | None = None
+    review_reply: AgentReply | None = None
+    work_reply: AgentReply | None = None
+
+    try:
+        if stage == "plan":
+            conversation.set_phase(RunPhase.ANALYZING)
+            plan_reply = await conversation.ask(
+                planner,
+                "你是需求分析与方案设计者。请针对下面的协作任务形成可执行的任务方案。\n"
+                f"任务：{workflow.get('goal') or goal}\n"
                 f"{workspace_context}"
-                "涉及代码检查/修改时，直接在工作目录使用工具（读取文件、rg、git 等），"
-                "不要等待用户粘贴代码；只有方案明确不涉及代码时才直接给出文本结果。\n"
-                "如果方案包含对仓库现状的断言，必须先实际读取/执行验证，以工具结果为准。\n"
-                "不要运行可能长时间阻塞或常驻的命令（启动服务、打开浏览器、交互式程序）；"
-                "验证命令应快速退出，单条命令不要超过 60 秒。\n"
-                f"【任务方案】\n{plan}\n"
-                f"【上一轮审查意见】\n{issues or '无'}\n"
-                "要求：说明你实际检查了哪些文件/命令；不要改动任务范围之外的文件。",
-                turn_id=round_no, timeout=timeout,
-                dedupe_key=f"{conversation.run_id}:{round_no}:{worker}",
-                role="worker", phase=RunPhase.EXECUTING,
+                "要求：\n"
+                "- 你无法访问文件系统或执行命令，不要猜测仓库内容，也不要假设 README/代码现状；\n"
+                "- 但执行者可以访问上述工作目录；检查代码任务应在方案中明确要求执行者在"
+                "该目录读取文件/运行 git，并给出实际证据；\n"
+                "- 不要写“等待用户提供代码”，也不要向用户提问或要求确认；\n"
+                "- 只给出步骤、检查项、期望结果与判定标准；\n"
+                "- 如果任务很简单（例如只输出一行文本），方案必须保持极简，"
+                "不要扩展交付物、检查清单或额外字段；\n"
+                "- 只做方案，不要修改代码。\n"
+                "输出：目标、检查项、期望结果、约束。",
+                turn_id=0, timeout=timeout,
+                dedupe_key=f"{conversation.run_id}:0:{planner}",
+                role="planner", phase=RunPhase.ANALYZING,
             )
+            plan = plan_reply.text
+            round_no = max(1, round_no)
+            workflow.update(plan=plan, stage="work", round=round_no)
+            conversation.save_workflow(workflow, event_type="workflow_plan_saved")
+            stage = "work"
+        elif stage == "work":
+            conversation.set_phase(RunPhase.EXECUTING)
+        else:
             conversation.set_phase(RunPhase.REVIEWING)
+
+        while True:
+            if round_no > max_rounds:
+                workflow["stage"] = "max_rounds"
+                conversation.save_workflow(workflow, event_type="workflow_max_rounds")
+                conversation.finish(
+                    RunStatus.FAILED, RunPhase.FAILED,
+                    {**metadata, "approved": False, "rounds": round_no - 1,
+                     "reason": "max_rounds_exceeded",
+                     "review": review.model_dump(mode="json") if review
+                     else workflow.get("review_result")},
+                )
+                return {
+                    "run_id": conversation.run_id, "approved": False,
+                    "rounds": round_no - 1, "plan": plan, "work": work_text,
+                    "review": review_reply.text if review_reply
+                    else str(workflow.get("review") or ""),
+                    "review_result": review.model_dump(mode="json") if review
+                    else workflow.get("review_result"),
+                    "error": "达到最大轮数仍未通过审查",
+                }
+
+            stage = workflow.get("stage") or stage
+            if stage == "work":
+                conversation.set_phase(RunPhase.EXECUTING)
+                conversation.save_workflow(workflow, event_type="workflow_node_work")
+                notes = str(workflow.get("notes") or "")
+                resume_note = f"【继续说明】{notes}\n" if notes else ""
+                work_reply = await conversation.ask(
+                    worker,
+                    "你是任务执行者。请严格依据任务方案完成工作。\n"
+                    f"{workspace_context}{resume_note}"
+                    "涉及代码检查/修改时，直接在工作目录使用工具（读取文件、rg、git 等），"
+                    "不要等待用户粘贴代码；只有方案明确不涉及代码时才直接给出文本结果。\n"
+                    "如果方案包含对仓库现状的断言，必须先实际读取/执行验证，以工具结果为准。\n"
+                    "不要运行可能长时间阻塞或常驻的命令（启动服务、打开浏览器、交互式程序）；"
+                    "验证命令应快速退出，单条命令不要超过 60 秒。\n"
+                    f"【任务方案】\n{plan}\n"
+                    f"【上一轮审查意见】\n{issues or '无'}\n"
+                    "要求：说明你实际检查了哪些文件/命令；不要改动任务范围之外的文件。",
+                    turn_id=round_no, timeout=timeout,
+                    dedupe_key=f"{conversation.run_id}:{round_no}:{worker}",
+                    role="worker", phase=RunPhase.EXECUTING,
+                )
+                work_text = work_reply.text
+                workflow.update(work=work_text, stage="review", notes="")
+                conversation.save_workflow(workflow, event_type="workflow_work_saved")
+                stage = "review"
+
+            conversation.set_phase(RunPhase.REVIEWING)
+            conversation.save_workflow(workflow, event_type="workflow_node_review")
             review_reply = await conversation.ask(
                 reviewer,
                 "你是审查者。请结合任务方案与执行结果进行审查。\n"
@@ -550,7 +659,7 @@ async def run_collaboration(conversation: Conversation, *,
                 "请以执行结果中的实际证据为准。如果工作目录已提供，而执行结果声称"
                 "“未收到代码”，应视为未完成任务。\n"
                 f"【任务方案】\n{plan}\n"
-                f"【执行结果】\n{work_reply.text}\n\n"
+                f"【执行结果】\n{work_text}\n\n"
                 f"{REVIEW_CONTRACT}",
                 turn_id=round_no, timeout=timeout,
                 dedupe_key=f"{conversation.run_id}:{round_no}:{reviewer}",
@@ -562,64 +671,72 @@ async def run_collaboration(conversation: Conversation, *,
                 conversation.attach_reply_metadata(review_reply, {
                     "review_parse_error": str(exc),
                 })
+                workflow["stage"] = "failed"
+                workflow["error"] = f"invalid_review: {exc}"
+                conversation.save_workflow(workflow, event_type="workflow_review_invalid")
                 conversation.finish(
                     RunStatus.FAILED, RunPhase.FAILED,
-                    {**metadata, "approved": False, "rounds": rounds,
+                    {**metadata, "approved": False, "rounds": round_no,
                      "reason": "invalid_review", "error": str(exc)},
                 )
                 return {
-                    "run_id": conversation.run_id, "approved": False, "rounds": rounds,
-                    "plan": plan, "work": work_reply.text, "review": review_reply.text,
+                    "run_id": conversation.run_id, "approved": False,
+                    "rounds": round_no, "plan": plan, "work": work_text,
+                    "review": review_reply.text,
                     "review_result": None, "error": f"审查结果结构非法：{exc}",
                 }
             conversation.attach_reply_metadata(review_reply, {
                 "review_result": review.model_dump(mode="json"),
             })
+            workflow["review"] = review_reply.text
+            workflow["review_result"] = review.model_dump(mode="json")
 
             if review.decision == "approved":
+                workflow["stage"] = "done"
+                conversation.save_workflow(workflow, event_type="workflow_done")
                 conversation.set_phase(RunPhase.APPROVED)
                 conversation.finish(
                     RunStatus.COMPLETED, RunPhase.COMPLETED,
-                    {**metadata, "approved": True, "rounds": rounds,
+                    {**metadata, "approved": True, "rounds": round_no,
                      "review": review.model_dump(mode="json")},
                 )
                 return {
-                    "run_id": conversation.run_id, "approved": True, "rounds": rounds,
-                    "plan": plan, "work": work_reply.text, "review": review_reply.text,
+                    "run_id": conversation.run_id, "approved": True,
+                    "rounds": round_no, "plan": plan, "work": work_text,
+                    "review": review_reply.text,
                     "review_result": review.model_dump(mode="json"),
                 }
             if review.decision == "blocked":
+                workflow["stage"] = "blocked"
+                conversation.save_workflow(workflow, event_type="workflow_blocked")
                 conversation.finish(
                     RunStatus.FAILED, RunPhase.FAILED,
-                    {**metadata, "approved": False, "rounds": rounds,
+                    {**metadata, "approved": False, "rounds": round_no,
                      "reason": "review_blocked",
                      "review": review.model_dump(mode="json")},
                 )
                 return {
-                    "run_id": conversation.run_id, "approved": False, "rounds": rounds,
-                    "plan": plan, "work": work_reply.text, "review": review_reply.text,
+                    "run_id": conversation.run_id, "approved": False,
+                    "rounds": round_no, "plan": plan, "work": work_text,
+                    "review": review_reply.text,
                     "review_result": review.model_dump(mode="json"),
                     "error": "审查判定为 blocked",
                 }
 
-            conversation.set_phase(RunPhase.REVISION_REQUIRED, event_type="revision_required",
-                                   payload={"round": round_no})
             issues = review_as_prompt(review)
-
-        reason = "max_rounds_exceeded"
-        conversation.finish(
-            RunStatus.FAILED, RunPhase.FAILED,
-            {**metadata, "approved": False, "rounds": rounds, "reason": reason,
-             "review": review.model_dump(mode="json") if review else None},
-        )
-        return {
-            "run_id": conversation.run_id, "approved": False, "rounds": rounds,
-            "plan": plan, "work": work_reply.text if work_reply else "",
-            "review": review_reply.text if review_reply else "",
-            "review_result": review.model_dump(mode="json") if review else None,
-            "error": "达到最大轮数仍未通过审查",
-        }
+            round_no += 1
+            workflow.update(issues=issues, round=round_no, stage="work", work="")
+            conversation.save_workflow(workflow, event_type="workflow_revision")
+            conversation.set_phase(
+                RunPhase.REVISION_REQUIRED, event_type="revision_required",
+                payload={"round": round_no - 1},
+            )
     except BaseException:
+        workflow["error"] = "exception"
+        try:
+            conversation.save_workflow(workflow, event_type="workflow_exception")
+        except Exception:  # noqa: BLE001
+            pass
         if conversation.run.status is RunStatus.RUNNING:
             conversation.finish(
                 RunStatus.FAILED, RunPhase.FAILED,

@@ -264,3 +264,79 @@ def test_workspace_context_is_passed_to_all_agents(tmp_path: Path) -> None:
     for name in ("planner", "worker", "reviewer"):
         assert any("F:/repo" in call for call in adapters[name].calls)
     store.close()
+
+class FailingReviewer(ScriptedAdapter):
+    async def send_message(self, session_id, text, *, timeout=None):
+        self.calls.append(text)
+        raise AdapterError("模拟审查节点失败")
+
+
+def test_workflow_resume_from_review_checkpoint(tmp_path: Path) -> None:
+    import json
+
+    store = Store(tmp_path / "workflow.db")
+    planner = ScriptedAdapter("planner", ["任务方案"])
+    worker = ScriptedAdapter("worker", ["执行完成"])
+    reviewer = FailingReviewer("reviewer", [])
+    parent = Conversation(
+        store,
+        {"planner": planner, "worker": worker, "reviewer": reviewer},
+        goal="检查代码",
+    )
+
+    async def fail_run() -> None:
+        try:
+            await run_collaboration(
+                parent, planner="planner", worker="worker", reviewer="reviewer",
+                max_rounds=2, goal="检查代码",
+            )
+        except AdapterError:
+            pass
+        finally:
+            await parent.close()
+
+    run(fail_run())
+    parent_run = store.get_run(parent.run_id)
+    assert parent_run.status is RunStatus.FAILED
+    workflow = parent_run.metadata["workflow"]
+    assert workflow["stage"] == "review"
+    assert workflow["plan"] == "任务方案"
+    assert workflow["work"] == "执行完成"
+
+    approved = json.dumps({
+        "decision": "approved", "summary": "ok", "findings": [],
+        "evidence": ["reviewed"], "confidence": 0.95,
+    })
+    new_planner = ScriptedAdapter("planner", ["不应调用"])
+    new_worker = ScriptedAdapter("worker", ["不应调用"])
+    new_reviewer = ScriptedAdapter("reviewer", [approved])
+    child = Conversation(
+        store,
+        {"planner": new_planner, "worker": new_worker, "reviewer": new_reviewer},
+        goal="检查代码",
+    )
+    child.store.update_run(child.run_id, metadata={
+        **child.run.metadata,
+        "parent_run_id": parent.run_id,
+        "workflow": {**workflow, "parent_run_id": parent.run_id},
+    })
+    child._refresh()
+
+    async def resume_run() -> dict:
+        try:
+            return await run_collaboration(
+                child, planner="planner", worker="worker", reviewer="reviewer",
+                max_rounds=2, goal="检查代码",
+            )
+        finally:
+            await child.close()
+
+    result = run(resume_run())
+    assert result["approved"] is True
+    assert new_planner.calls == []
+    assert new_worker.calls == []
+    assert len(new_reviewer.calls) == 1
+    child_run = store.get_run(child.run_id)
+    assert child_run.status is RunStatus.COMPLETED
+    assert child_run.metadata["workflow"]["stage"] == "done"
+    store.close()

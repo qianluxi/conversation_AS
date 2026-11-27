@@ -372,6 +372,22 @@ python -m agentorchestrator --config config.yaml run --goal "审查特征工程�
 - `revision_required` 必须至少一条 finding；
 - 出现未定义字段、缺字段、空 summary → 视为非法，整轮失败。
 
+### 7.1 继续上次任务（工作流检查点）
+
+每次运行会保存 `workflow` 检查点：`stage`（plan/work/review）、`round`、
+`plan`、`work`、`issues`、审查结果。
+
+- 失败在 Worker：`stage=work`，已完成的 Plan 不会重跑；
+- 失败在 Reviewer：`stage=review`，Worker 结果不会重跑，只重跑审查；
+- 界面运行详情会出现 **「继续此任务」** 按钮；
+- 继续会创建一个**新 run**（记录 `parent_run_id`），原 run 保持原状态，
+  不会原地重开终态 run；
+- 如果上次 Worker 结果未知（`stage=work` 且没有 `work`），继续前需要确认，
+  因为节点可能已经执行；系统会在提示中要求先检查已有产物。
+
+旧版本创建的 run 没有检查点，会从已有消息中推导 plan/work 后再继续。
+`resume` 仍只用于消息级恢复；工作流续跑请用「继续此任务」。
+
 ---
 
 ## 8. 故障处理手册（Runbook）
@@ -521,7 +537,7 @@ asyncio.run(main())
 
 - 同一时刻建议只运行一个协调器进程；本地助理的互斥是进程内共享门，
   跨进程需要额外的文件锁/任务队列（后续版本）。
-- `resume` 只核对/补齐消息，不自动继续整个工作流。
+- `resume` 只核对/补齐消息；要按节点继续工作流，请用界面的「继续此任务」。
 - ACP 重启后无法唯一关联历史轮次，会保留 `unknown`。
 - OpenCode 的工具权限由 OpenCode 自行控制，本协调器不做拦截。
 - 远端 `create_session` 在结果不确定时不会写入消息记录，需要人工确认会话是否创建。

@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.6.5`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.7.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -337,8 +337,23 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 73 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 76 项：单元 + fake server + 故障注入 + API/UI
 ```
+
+## 继续上次任务（工作流检查点）
+
+每次运行在 `run.metadata.workflow` 保存检查点：`stage`（plan/work/review）、
+`round`、`plan`、`work`、`issues`、审查结果。
+
+- 失败在 Worker：`stage=work`，已完成的 Plan 不重跑；
+- 失败在 Reviewer：`stage=review`，Worker 结果不重跑，只重跑审查；
+- 界面点击 **「继续此任务」** 会创建一个新 run（`parent_run_id`），
+  从检查点继续，原 run 保持原状态（不会原地重开终态 run）；
+- 若 Worker 结果未知（`stage=work` 且无 `work`），继续前需要确认
+  `retry_unknown`，因为节点可能已经执行；
+- 旧 run 没有检查点时，会从消息中推导 checkpoint。
+
+API：`POST /api/runs/{run_id}/continue`。`resume` 仍只负责消息级恢复。
 
 ## 测试
 
@@ -359,14 +374,15 @@ OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选�
   因此它是结构化 AI 审查，不是完整质量门禁。
 - “只读/不要修改”写在任务目标里只是提示；真正的只读边界是把 OpenCode
   执行角色设为 `plan`。
-- 只恢复消息级状态，尚未实现工作流级断点续跑。
+- 继续任务会创建新 run，不会原地重开已失败的 terminal run；若要“同 run 续跑”
+  需要进一步放宽状态机，当前不做。
 - 生成类任务可能已经写出文件，但仍在跑验证命令；等待超时会标记失败。
   此时先检查工作目录里的产物，再决定是否强制释放/重试；超时后协调器会尝试中止
   OpenCode 会话，避免长驻命令继续占用。
 
 ## 后续（阶段三）
 
-1. 工作流 YAML 化与工作流级断点续跑（当前只恢复消息）。
+1. 工作流 YAML 化（检查点续跑已支持，当前仍是固定 分析→执行→审查 流程）。
 2. 跨进程互斥（文件锁）与持久化任务队列。
 3. 角色与品牌解耦、第三/第四个智能体、并行执行（代码写入保持单写者）。
 
