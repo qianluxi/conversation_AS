@@ -338,6 +338,7 @@ def create_app(config: AppConfig, store: Store,
                     goal=payload.goal, timeout=payload.timeout,
                     workspace=directory,
                     read_only=payload.opencode_agent == "plan",
+                    verification_excludes=cfg.verification.exclude_dirs,
                 )
             except Exception as exc:  # noqa: BLE001 - 记录到 UI
                 handle.error = f"{type(exc).__name__}: {exc}"
@@ -377,6 +378,11 @@ def create_app(config: AppConfig, store: Store,
         workspace = (parent.metadata.get("workspace")
                      or parent.metadata.get("opencode_directory")
                      or workflow.get("workspace"))
+        planner = workflow.get("planner") or parent.metadata.get("planner")
+        worker = workflow.get("worker") or parent.metadata.get("worker")
+        reviewer = workflow.get("reviewer") or parent.metadata.get("reviewer")
+        if not planner or not worker:
+            raise HTTPException(409, "父 run 缺少 planner/worker 信息，无法继续")
         adapters = build_adapters(cfg)
         model_spec = parent.metadata.get("opencode_model")
         agent_name = parent.metadata.get("opencode_agent")
@@ -443,11 +449,6 @@ def create_app(config: AppConfig, store: Store,
 
         handle = RunHandle(run_id=conversation.run_id, conversation=conversation)
         request.app.state.handles[handle.run_id] = handle
-        planner = workflow.get("planner") or parent.metadata.get("planner")
-        worker = workflow.get("worker") or parent.metadata.get("worker")
-        reviewer = workflow.get("reviewer") or parent.metadata.get("reviewer")
-        if not planner or not worker:
-            raise HTTPException(409, "父 run 缺少 planner/worker 信息，无法继续")
         timeout = parent.metadata.get("timeout")
 
         async def runner() -> None:
@@ -457,6 +458,7 @@ def create_app(config: AppConfig, store: Store,
                     planner=planner, worker=worker, reviewer=reviewer,
                     max_rounds=max_rounds, goal=goal, timeout=timeout,
                     workspace=workspace, read_only=read_only,
+                    verification_excludes=cfg.verification.exclude_dirs,
                 )
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"

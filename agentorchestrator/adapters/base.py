@@ -15,6 +15,12 @@ class AdapterError(RuntimeError):
 class AdapterUncertain(AdapterError):
     """请求可能已被服务端接受，但本地无法确认。必须按 UNKNOWN 处理，禁止自动重发。"""
 
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 payload: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
+
 
 class AdapterAuthError(AdapterError):
     """鉴权失败或缺少凭据。"""

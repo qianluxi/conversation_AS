@@ -146,9 +146,12 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 选择工作目录后，协调器会把“当前工作目录”写入 Planner/Worker/Reviewer 的提示：
 “检查代码/项目”时不需要再粘贴代码，执行者应在该目录内直接使用工具检查。
 
-协调器还会在 Worker 前后独立执行 `git HEAD/status/diff` 快照，并把结果写入
-Reviewer 提示词（独立证据）。当执行角色是 `plan` 时，如果快照发生变化（修改、
-新增、删除文件或新 commit），本次运行会以 `read_only_violation` 失败，不进入审查。
+协调器还会在 Worker 前后独立执行 `git HEAD/status/diff` 快照，并对纳入范围的
+文件计算内容 SHA-256（覆盖被 git 忽略的文件），结果写入 Reviewer 提示词。
+排除目录可通过 `verification.exclude_dirs` 配置，界面会显示排除范围。
+当执行角色是 `plan` 时，如果快照发生变化（修改、新增、删除文件或新 commit），
+本次运行会以 `read_only_violation` 失败；快照不可用则以
+`verification_unavailable` 失败，不进入审查。
 
 另外：Planner 也看不到文件，只能根据目标写方案，可能误判仓库现状。如果只是读取
 某个文件/变量，请在目标里写清楚文件名与期望输出，或把执行角色设为 `plan` 并在

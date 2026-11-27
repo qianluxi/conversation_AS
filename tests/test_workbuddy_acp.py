@@ -6,8 +6,8 @@ from typing import Any
 import httpx
 import pytest
 
-from agentorchestrator.adapters.base import AdapterError
-from agentorchestrator.adapters.workbuddy_acp import WorkBuddyAcpAdapter
+from agentorchestrator.adapters.base import AdapterError, AdapterRemoteError, AdapterUncertain
+from agentorchestrator.adapters.workbuddy_acp import AcpPhase, WorkBuddyAcpAdapter
 from agentorchestrator.config import PermissionSettings, WorkBuddyAcpSettings
 
 from conftest import FakeAuth, run
@@ -35,12 +35,14 @@ class _QueueStream(httpx.AsyncByteStream):
 class FakeACPTransport(httpx.AsyncBaseTransport):
     """模拟 WorkBuddy 控制面 + ACP SSE 通道。"""
 
-    def __init__(self, permission_title: str = "Write file") -> None:
+    def __init__(self, permission_title: str = "Write file",
+                 prompt_status: int = 200) -> None:
         import asyncio
 
         self.queue: Any = asyncio.Queue()
         self.requests: list[tuple[httpx.Request, dict[str, Any]]] = []
         self.permission_title = permission_title
+        self.prompt_status = prompt_status
 
     def push(self, payload: dict[str, Any]) -> None:
         self.queue.put_nowait(_sse(payload))
@@ -74,6 +76,8 @@ class FakeACPTransport(httpx.AsyncBaseTransport):
         elif method == "session/load":
             self.push({"jsonrpc": "2.0", "id": body["id"], "result": {}})
         elif method == "session/prompt":
+            if self.prompt_status >= 400:
+                return httpx.Response(self.prompt_status, json={"error": "boom"})
             self.push({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "t1",
                 "update": {"sessionUpdate": "agent_message_chunk",
@@ -209,6 +213,114 @@ def test_second_prompt_before_wait_is_rejected() -> None:
                 ref2 = await adapter.send_message(session_id, "two")
                 reply2 = await adapter.wait_response(ref2, timeout=3)
                 assert reply2.text == "hello world"
+            finally:
+                await adapter.aclose()
+
+    run(scenario())
+
+def test_uncertain_prompt_quarantines_session() -> None:
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=3, poll_interval=0.01,
+    )
+    transport = FakeACPTransport("Write file", prompt_status=500)
+
+    async def scenario() -> AcpPhase:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                with pytest.raises(AdapterUncertain):
+                    await adapter.send_message(session_id, "one")
+                session = adapter._sessions[session_id]
+                assert session.state is AcpPhase.QUARANTINED
+                with pytest.raises(AdapterError):
+                    await adapter.send_message(session_id, "two")
+                await adapter.cancel_wait(session_id)
+                assert session.state is AcpPhase.CANCELLED
+                return session.state
+            finally:
+                await adapter.aclose()
+
+    assert run(scenario()) is AcpPhase.CANCELLED
+
+
+def test_definite_prompt_error_releases_session() -> None:
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=3, poll_interval=0.01,
+    )
+    transport = FakeACPTransport("Write file", prompt_status=400)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                with pytest.raises(AdapterRemoteError):
+                    await adapter.send_message(session_id, "one")
+                assert adapter._sessions[session_id].state is AcpPhase.IDLE
+                transport.prompt_status = 200
+                ref = await adapter.send_message(session_id, "two")
+                reply = await adapter.wait_response(ref, timeout=3)
+                assert reply.text == "hello world"
+            finally:
+                await adapter.aclose()
+
+    run(scenario())
+
+def test_permission_broker_roundtrip_with_acp() -> None:
+    import asyncio
+
+    from agentorchestrator.permissions import PermissionBroker
+
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=3, poll_interval=0.01,
+    )
+    transport = FakeACPTransport("Write file")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            broker = PermissionBroker(timeout=5)
+
+            async def handler(message):
+                return await broker.request("run1", "wb_acp", message)
+
+            adapter.permission_handler = handler
+            try:
+                session_id = await adapter.create_session("run1")
+                ref = await adapter.send_message(session_id, "hi")
+                pending = []
+                for _ in range(100):
+                    pending = broker.pending()
+                    if pending:
+                        break
+                    await asyncio.sleep(0.01)
+                assert pending
+                broker.resolve(pending[0]["request_id"], decision="allow")
+                reply = await adapter.wait_response(ref, timeout=3)
+                assert reply.text == "hello world"
+                replies = [
+                    body for _request, body in transport.requests
+                    if body.get("id") == 99 and "result" in body
+                ]
+                assert replies
+                assert replies[0]["result"]["outcome"]["optionId"] == "allow"
+                assert broker.pending() == []
             finally:
                 await adapter.aclose()
 

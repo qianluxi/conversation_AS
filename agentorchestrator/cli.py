@@ -135,7 +135,7 @@ async def _cmd_run(_config: AppConfig, adapters: dict[str, AgentAdapter],
             conversation, planner=args.planner, worker=args.worker,
             reviewer=args.reviewer, max_rounds=args.max_rounds,
             goal=args.goal, timeout=args.timeout, workspace=workspace,
-            read_only=read_only,
+            read_only=read_only, verification_excludes=_config.verification.exclude_dirs,
         )
         print(f"\nrun_id = {result['run_id']}")
         print(f"approved = {result['approved']}  rounds = {result['rounds']}")

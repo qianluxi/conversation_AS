@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -39,11 +40,20 @@ class _Task:
     expire_at: int | None = None
 
 
+class AcpPhase(str, Enum):
+    IDLE = "idle"
+    PROMPTING = "prompting"
+    WAITING = "waiting"
+    QUARANTINED = "quarantined"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class _AcpSession:
     session_id: str
     task: _Task | None = None
     ready: bool = False
+    state: AcpPhase = AcpPhase.IDLE
 
 
 @dataclass
@@ -420,11 +430,26 @@ class WorkBuddyAcpAdapter(AgentAdapter):
 
     # ---- send / wait ------------------------------------------------------
 
+    def _cleanup_prompt(self, state: _PromptState) -> None:
+        self._prompts.pop(state.rpc_id, None)
+        if self._active_by_session.get(state.task_id) is state:
+            self._active_by_session.pop(state.task_id, None)
+        if not state.future.done():
+            state.future.cancel()
+
     async def send_message(self, session_id: str, text: str, *,
                            timeout: float | None = None) -> MessageRef:
         session = self._sessions.get(session_id)
         if session is None:
             raise AdapterError(f"未知的 ACP 会话：{session_id}")
+        if session.state is AcpPhase.QUARANTINED:
+            raise AdapterError("该 ACP 会话处于隔离状态，请先 cancel_wait/remote_abort 并核对远端。")
+        if session.state is AcpPhase.CANCELLED:
+            raise AdapterError("该 ACP 会话已取消，请新建会话。")
+        if session.state is not AcpPhase.IDLE:
+            raise AdapterError(
+                f"该 ACP 会话正在处理上一轮（{session.state.value}），禁止并发发送。"
+            )
         limit = timeout if timeout is not None else self.settings.timeout
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         if lock.locked():
@@ -432,6 +457,8 @@ class WorkBuddyAcpAdapter(AgentAdapter):
                 "该 ACP 会话正在等待上一轮响应，禁止并发发送（避免流式 chunk 串扰）。"
             )
         await lock.acquire()
+        session.state = AcpPhase.PROMPTING
+        state: _PromptState | None = None
         try:
             await self._ensure_ready(session, limit)
             if self._stream_error is not None:
@@ -451,9 +478,28 @@ class WorkBuddyAcpAdapter(AgentAdapter):
                             "prompt": [{"type": "text", "text": text}]}},
                 task=task,
             )
-        except BaseException:
+        except (AdapterUncertain, AdapterTimeout):
+            # 请求可能已到达服务端：保持锁和 active 状态，禁止新 prompt 串扰。
+            session.state = AcpPhase.QUARANTINED
+            raise
+        except asyncio.CancelledError:
+            if state is not None:
+                self._cleanup_prompt(state)
+            session.state = AcpPhase.CANCELLED
             lock.release()
             raise
+        except AdapterError:
+            if state is not None:
+                self._cleanup_prompt(state)
+            session.state = AcpPhase.IDLE
+            lock.release()
+            raise
+        except BaseException:
+            if state is not None:
+                self._cleanup_prompt(state)
+            session.state = AcpPhase.QUARANTINED
+            raise
+        session.state = AcpPhase.WAITING
         return MessageRef(session_id=session_id, message_id=f"acp-{rpc_id}",
                           metadata={"rpc_id": rpc_id, "task_id": task.task_id})
 
@@ -462,13 +508,30 @@ class WorkBuddyAcpAdapter(AgentAdapter):
         state = self._prompts.get(int(rpc_id)) if rpc_id is not None else None
         if state is None:
             raise AdapterError(f"未知的 ACP 消息引用：{ref.message_id}")
+        session = self._sessions.get(state.session_id)
         limit = timeout if timeout is not None else self.settings.timeout
         try:
             result = await asyncio.wait_for(asyncio.shield(state.future), timeout=limit)
         except asyncio.TimeoutError as exc:
             # 远端可能仍在执行：保留会话锁与 active 状态，等待 cancel/abort 或人工处理
+            if session is not None:
+                session.state = AcpPhase.QUARANTINED
             raise AdapterTimeout(f"等待 WorkBuddy ACP 响应超时（{limit}s）") from exc
-        self._active_by_session.pop(state.task_id, None)
+        except asyncio.CancelledError:
+            if session is not None:
+                session.state = AcpPhase.CANCELLED
+            self._cleanup_prompt(state)
+            lock = self._locks.get(ref.session_id)
+            if lock is not None and lock.locked():
+                lock.release()
+            raise
+        except Exception:
+            if session is not None:
+                session.state = AcpPhase.QUARANTINED
+            raise
+        self._cleanup_prompt(state)
+        if session is not None:
+            session.state = AcpPhase.IDLE
         lock = self._locks.get(ref.session_id)
         if lock is not None and lock.locked():
             lock.release()
@@ -483,8 +546,12 @@ class WorkBuddyAcpAdapter(AgentAdapter):
 
     async def cancel_wait(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
-        if session is not None and session.task is not None:
-            self._active_by_session.pop(session.task.task_id, None)
+        if session is not None:
+            session.state = AcpPhase.CANCELLED
+            if session.task is not None:
+                state = self._active_by_session.get(session.task.task_id)
+                if state is not None:
+                    self._cleanup_prompt(state)
         lock = self._locks.get(session_id)
         if lock is not None and lock.locked():
             lock.release()
@@ -511,6 +578,10 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             await self.cancel_wait(session_id)
 
     async def aclose(self) -> None:
+        for session in self._sessions.values():
+            session.state = AcpPhase.CANCELLED
+        for state in list(self._prompts.values()):
+            self._cleanup_prompt(state)
         for lock in self._locks.values():
             if lock.locked():
                 lock.release()

@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.9.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.10.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -182,9 +182,9 @@ IDLE → SUBMITTED → RUNNING → IDLE
 
 ### 5.1 独立工作区证据与只读保护
 
-协调器在 Worker 前后独立执行 `git HEAD / status / diff` 快照，并额外计算文件树
-指纹（覆盖被 `.gitignore` 忽略的文件），把“协调器实测工作区”写入 Reviewer
-提示词和 `workflow.verification`。这不依赖模型自报的证据。
+协调器在 Worker 前后独立执行 `git HEAD / status / diff` 快照，并对纳入范围的
+文件计算 **内容 SHA-256**（不只是 mtime/size），把“协调器实测工作区”写入
+Reviewer 提示词和 `workflow.verification`。这不依赖模型自报的证据。
 
 当 OpenCode 执行角色为 `plan`（只读）时：
 
@@ -192,7 +192,8 @@ IDLE → SUBMITTED → RUNNING → IDLE
 - 工作区不是 git 仓库 / git 不可用 / 快照失败 → 运行失败，原因
   `verification_unavailable`（fail-closed，不把“无法验证”当作通过）。
 
-文件树指纹默认排除 `.git`、`data`、`logs`、`.venv`、`node_modules` 等目录；
+文件树指纹默认排除 `.git`、`data`、`logs`、`.venv`、`node_modules` 等目录
+（可通过 `verification.exclude_dirs` 配置，并在 UI 校验信息中展示）；
 `plan` 的原生只读权限仍是第一道边界，快照是第二道独立检查，不等于完整文件系统沙箱。
 
 ### 6. 工具权限：token/能力匹配
@@ -359,7 +360,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 88 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 95 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）

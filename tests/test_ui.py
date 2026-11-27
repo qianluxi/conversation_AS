@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from agentorchestrator.adapters.base import (
+    AgentAdapter,
+    AgentReply,
+    HealthStatus,
+    MessageRef,
+)
 from agentorchestrator.api.server import create_app
 from agentorchestrator.config import AppConfig, MockSettings, StorageSettings
 from agentorchestrator.messaging.schema import RunPhase, RunStatus
@@ -220,5 +227,101 @@ def test_continue_unknown_work_requires_confirmation(tmp_path: Path) -> None:
                 time.sleep(0.05)
             assert data["run"]["status"] == "completed"
             assert data["run"]["metadata"]["workflow"]["stage"] == "done"
+    finally:
+        store.close()
+
+def test_continue_without_planner_does_not_create_run(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = Store(config.storage.path)
+    parent = store.create_run("检查代码")
+    store.update_run(
+        parent.run_id, status=RunStatus.FAILED, phase=RunPhase.FAILED,
+        metadata={
+            "workflow": {
+                "stage": "review", "round": 1, "plan": "方案",
+                "work": "执行完成", "issues": "", "notes": "",
+                "review": "", "review_result": None, "max_rounds": 2,
+            },
+        },
+    )
+    before = len(store.list_runs(100))
+    app = create_app(config, store)
+    try:
+        with TestClient(app) as client:
+            response = client.post(f"/api/runs/{parent.run_id}/continue", json={})
+            assert response.status_code == 409
+            assert len(store.list_runs(100)) == before
+    finally:
+        store.close()
+
+class _QuickAdapter(AgentAdapter):
+    kind = "test"
+
+    def __init__(self, name: str, reply: str = "", *, block: bool = False) -> None:
+        super().__init__(name)
+        self.reply = reply
+        self.block = block
+
+    async def health_check(self):
+        return HealthStatus(True)
+
+    async def create_session(self, run_id: str, config=None) -> str:
+        return f"test-{self.name}"
+
+    async def send_message(self, session_id: str, text: str, *, timeout=None) -> MessageRef:
+        return MessageRef(session_id=session_id, message_id=f"{self.name}-msg")
+
+    async def wait_response(self, ref: MessageRef, *, timeout=None) -> AgentReply:
+        if self.block:
+            await asyncio.Event().wait()
+        return AgentReply(session_id=ref.session_id, text=self.reply, stop_reason="end_turn")
+
+    async def cancel(self, session_id: str) -> None:
+        return None
+
+
+def test_cancel_active_run(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    store = Store(config.storage.path)
+    adapters = {
+        "planner": _QuickAdapter("planner", "任务方案"),
+        "worker": _QuickAdapter("worker", block=True),
+    }
+    monkeypatch.setattr(
+        "agentorchestrator.api.server.build_adapters", lambda _cfg: adapters,
+    )
+    app = create_app(config, store)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/runs", json={
+                "goal": "检查代码", "planner": "planner", "worker": "worker",
+                "max_rounds": 1, "timeout": 30,
+            })
+            assert response.status_code == 200
+            run_id = response.json()["run_id"]
+            for _ in range(100):
+                data = client.get(f"/api/runs/{run_id}").json()
+                if data["active"] and any(
+                    step["role"] == "worker" and step["state"] == "running"
+                    for step in data["steps"]
+                ):
+                    break
+                time.sleep(0.02)
+
+            cancel = client.post(f"/api/runs/{run_id}/cancel", json={})
+            assert cancel.status_code == 200
+            for _ in range(100):
+                data = client.get(f"/api/runs/{run_id}").json()
+                if not data["active"]:
+                    break
+                time.sleep(0.02)
+
+            assert data["run"]["status"] == "cancelled"
+            assert data["run"]["phase"] == "cancelled"
+            assert data["permissions"] == []
+            worker_messages = [m for m in data["messages"] if m["to_agent"] == "worker"]
+            assert worker_messages and worker_messages[0]["status"] == "cancelled"
+            worker_steps = [s for s in data["steps"] if s["role"] == "worker"]
+            assert worker_steps and worker_steps[0]["state"] == "failed"
     finally:
         store.close()

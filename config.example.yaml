@@ -76,4 +76,9 @@ agents:
 storage:
   path: data/orchestrator.db
 
+# 只读验证的文件树指纹排除目录（也会在 UI 的校验信息中展示）
+verification:
+  exclude_dirs: [.git, data, logs, __pycache__, .pytest_cache, .mypy_cache,
+                 .ruff_cache, .venv, venv, node_modules, dist, build]
+
 log_level: INFO

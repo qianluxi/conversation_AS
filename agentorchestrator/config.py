@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal, Union
 import yaml
 from pydantic import BaseModel, Field
 
+from .verification import DEFAULT_EXCLUDE_DIRS
+
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -248,9 +250,14 @@ class StorageSettings(BaseModel):
     path: str = "data/orchestrator.db"
 
 
+class VerificationSettings(BaseModel):
+    exclude_dirs: list[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDE_DIRS))
+
+
 class AppConfig(BaseModel):
     agents: dict[str, AgentSettings] = Field(default_factory=dict)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    verification: VerificationSettings = Field(default_factory=VerificationSettings)
     log_level: str = "INFO"
 
     def agent(self, name: str) -> AgentSettings:

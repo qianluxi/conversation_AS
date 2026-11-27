@@ -163,3 +163,40 @@ def test_read_only_unavailable_verification_fails(tmp_path: Path) -> None:
     assert stored.metadata["workflow"]["error"] == "verification_unavailable"
     assert adapters["reviewer"].calls == []
     store.close()
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_content_hash_detects_same_size_and_restored_mtime(tmp_path: Path) -> None:
+    import os
+
+    repo = tmp_path / "repo-hash"
+    repo.mkdir()
+    _make_repo(repo)
+    target = repo / "a.txt"
+    target.write_text("AAAA\n", encoding="utf-8")
+    before = capture_workspace(repo)
+    stat = target.stat()
+    target.write_text("BBBB\n", encoding="utf-8")
+    os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    after = capture_workspace(repo)
+    assert workspace_changed(before, after) is True
+
+
+def test_git_command_failure_marks_unavailable(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    import agentorchestrator.verification as verification
+
+    repo = tmp_path / "repo-fail"
+    repo.mkdir()
+
+    def fake_git(path, args, timeout=10):
+        if args[:2] == ["rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(args, 0, "true\n", "")
+        if args[:1] == ["status"]:
+            return subprocess.CompletedProcess(args, 1, "", "boom")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(verification, "_git", fake_git)
+    snapshot = capture_workspace(repo)
+    assert snapshot["available"] is False
+    assert snapshot["reason"] == "git_command_failed"

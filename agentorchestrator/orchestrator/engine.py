@@ -531,7 +531,8 @@ async def run_collaboration(conversation: Conversation, *,
                             max_rounds: int = 2, goal: str = "",
                             timeout: float | None = None,
                             workspace: str | None = None,
-                            read_only: bool = False) -> dict[str, Any]:
+                            read_only: bool = False,
+                            verification_excludes: list[str] | None = None) -> dict[str, Any]:
     """结构化流程：分析 -> 执行 -> 结构化审查；支持从持久化检查点继续。"""
     reviewer = reviewer or planner
     workflow = conversation.get_workflow()
@@ -666,7 +667,9 @@ async def run_collaboration(conversation: Conversation, *,
             stage = workflow.get("stage") or stage
             if stage == "work":
                 conversation.set_phase(RunPhase.EXECUTING)
-                verification_before = capture_workspace(workspace)
+                verification_before = capture_workspace(
+                    workspace, exclude_dirs=verification_excludes,
+                )
                 workflow["verification_before"] = verification_before
                 conversation.save_workflow(workflow, event_type="workflow_node_work")
                 notes = str(workflow.get("notes") or "")
@@ -688,7 +691,9 @@ async def run_collaboration(conversation: Conversation, *,
                     role="worker", phase=RunPhase.EXECUTING,
                 )
                 work_text = work_reply.text
-                verification_after = capture_workspace(workspace)
+                verification_after = capture_workspace(
+                    workspace, exclude_dirs=verification_excludes,
+                )
                 changed = workspace_changed(verification_before, verification_after)
                 workflow.update(
                     work=work_text, stage="review", notes="",
@@ -696,6 +701,7 @@ async def run_collaboration(conversation: Conversation, *,
                         "before": verification_before,
                         "after": verification_after,
                         "changed": changed,
+                        "exclude_dirs": (verification_before or {}).get("exclude_dirs"),
                     },
                 )
                 conversation.save_workflow(workflow, event_type="workflow_work_saved")
