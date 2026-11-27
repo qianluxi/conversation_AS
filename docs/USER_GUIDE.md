@@ -266,7 +266,18 @@ python -m agentorchestrator --config config.yaml send --agent workbuddy_acp --te
 
 ### 6.1 图形界面（推荐）
 
-界面依赖是可选的 `web` extra（FastAPI + uvicorn）；未安装时 `ui` 会提示安装命令。
+Windows 下可直接双击项目根目录的 **`start.bat`**。它会：
+
+1. 检查 Python 与 Web 依赖；
+2. 检查 WorkBuddy 桌面端是否运行（未运行会提示）；
+3. 在 4097 启动一个专用 OpenCode 服务（密码写入 `data/opencode-password.txt`）；
+4. 启动界面并打开 `http://127.0.0.1:8765/`。
+
+如果已有旧 `config.yaml`，请把 `agents.opencode.base_url` 改成
+`${OPENCODE_BASE_URL:-http://127.0.0.1:4096}`，否则 `start.bat` 的 4097 不会生效。
+关闭标题为 “OpenCode 4097” 的窗口会停止该 OpenCode 服务。
+
+也可手动启动：
 
 ```powershell
 python -m pip install -e ".[web]"

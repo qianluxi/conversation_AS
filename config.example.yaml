@@ -50,7 +50,7 @@ agents:
 
   opencode:
     type: opencode
-    base_url: http://127.0.0.1:4096
+    base_url: ${OPENCODE_BASE_URL:-http://127.0.0.1:4096}
     username: opencode
     password: ${OPENCODE_SERVER_PASSWORD}
     # legacy: /session + /session/:id/prompt_async（兼容性最好）

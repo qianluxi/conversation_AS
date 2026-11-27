@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.6.2`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.6.3`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -40,12 +40,28 @@ python -m agentorchestrator events --run-id <run_id>
 
 ## 图形界面（推荐给普通用户）
 
-界面依赖是可选的 `web` extra（FastAPI + uvicorn）；未安装时 `ui` 会提示安装命令。
+Windows 用户可以直接双击仓库根目录的 **`start.bat`**：它会检查 Python/依赖、
+确认 WorkBuddy 是否运行、在 4097 启动一个专用 OpenCode 服务，然后启动界面并打开
+`http://127.0.0.1:8765/`。OpenCode 访问密码保存在 `data/opencode-password.txt`
+（已 gitignore），下次启动复用。
+
+也可以手动启动（需要自己先运行 `opencode serve`）：
 
 ```powershell
 python -m pip install -e ".[web]"
 python -m agentorchestrator ui
 ```
+
+`start.bat` 支持透传 UI 参数，例如：
+
+```bat
+start.bat --port 8766 --token my-password
+```
+
+注意：它使用 4097 的专用 OpenCode 服务。如果已有旧 `config.yaml`，请把
+`agents.opencode.base_url` 写成
+`${OPENCODE_BASE_URL:-http://127.0.0.1:4096}`（或删除后从示例重新复制），
+否则 `start.bat` 设置的 4097 不会生效。
 
 默认自动打开 `http://127.0.0.1:8765/`，包含：
 
