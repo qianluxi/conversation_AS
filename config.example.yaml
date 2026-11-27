@@ -66,6 +66,9 @@ agents:
     # provider_id: opencode-go
     # model_id: deepseek-v4.1-flash
     timeout: 600
+    # 无进展超时：连续 N 秒没有新的文本/工具状态变化就中止，0 表示关闭。
+    # 用于尽快发现挂起的命令；真正长时间单条命令可临时调大或设为 0。
+    inactivity_timeout: 300
     poll_interval: 1
 
   # 离线演示/测试用，不访问网络

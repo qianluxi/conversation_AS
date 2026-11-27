@@ -175,6 +175,7 @@ class OpencodeSettings(BaseModel):
     provider_id: str | None = None
     model_id: str | None = None
     timeout: float = 600.0
+    inactivity_timeout: float = 300.0
     poll_interval: float = 1.0
     verify_ssl: bool = True
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)

@@ -191,3 +191,46 @@ def test_wait_timeout_aborts_remote_session() -> None:
 
     run(scenario())
     assert state["aborted"] is True
+
+def test_inactivity_timeout_reports_current_tool() -> None:
+    state: dict[str, Any] = {"messages": [], "aborted": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/session":
+            return httpx.Response(200, json={"id": "ses_idle"})
+        if path == "/session/ses_idle/prompt_async":
+            body = json.loads(request.content)
+            state["messages"] = [
+                {"info": {"id": body["messageID"], "sessionID": "ses_idle", "role": "user",
+                          "time": {"created": 1000}},
+                 "parts": [{"type": "text", "text": "hi"}]},
+                {"info": {"id": "msg_a", "sessionID": "ses_idle", "role": "assistant",
+                          "parentID": body["messageID"], "time": {"created": 2000}},
+                 "parts": [{"type": "tool", "tool": "bash",
+                            "state": {"status": "running",
+                                      "input": {"command": "npm install"}}}]},
+            ]
+            return httpx.Response(204)
+        if path == "/session/ses_idle/message":
+            return httpx.Response(200, json=state["messages"])
+        if path == "/session/ses_idle/abort":
+            state["aborted"] = True
+            return httpx.Response(200, json=True)
+        return httpx.Response(404, json={"error": path})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter(
+                "oc", _settings(inactivity_timeout=0.08, timeout=5), client=client
+            )
+            session_id = await adapter.create_session("run-idle")
+            ref = await adapter.send_message(session_id, "hi")
+            with pytest.raises(AdapterTimeout) as excinfo:
+                await adapter.wait_response(ref, timeout=5)
+            assert "没有新进展" in str(excinfo.value)
+            assert "npm install" in str(excinfo.value)
+
+    run(scenario())
+    assert state["aborted"] is True

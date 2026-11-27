@@ -13,7 +13,7 @@
 | OpenCode | 1.19.0 |
 | WorkBuddy Desktop | 2.165.0 |
 | 模型 | `opencode-go/deepseek-v4.1-flash` |
-| 协调器 | conversation_AS 0.6.x ~ 0.10.1 |
+| 协调器 | conversation_AS 0.6.x ~ 0.10.2 |
 
 ## OpenCode
 
@@ -65,6 +65,8 @@
 - 只读验证增加文件内容 SHA-256、符号链接目标、扫描限制与统计；非 git 工作区
   或扫描超限返回 `verification_unavailable` 并停止只读运行。
 - ACP 不确定提交进入 QUARANTINED，保持会话锁，禁止后续 prompt 覆盖流式消息归属。
+- OpenCode 等待增加无进展超时，错误中显示最近工具/命令；执行提示词禁止截图、
+  浏览器/GUI 等易挂起操作。
 
 ### 官方 OAuth 本地助理 / 云端 ACP
 

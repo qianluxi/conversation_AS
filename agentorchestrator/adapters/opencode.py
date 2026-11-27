@@ -53,6 +53,7 @@ class OpenCodeAdapter(AgentAdapter):
         self.settings = settings
         self._base = settings.base_url.rstrip("/")
         self._timeout = settings.timeout
+        self._inactivity_timeout = settings.inactivity_timeout
         self._client = client
         self._owns_client = client is None
         if self._client is None:
@@ -275,22 +276,40 @@ class OpenCodeAdapter(AgentAdapter):
             raise AdapterError(f"未知的消息引用：{ref.message_id}")
 
         limit = timeout if timeout is not None else self._timeout
-        deadline = asyncio.get_running_loop().time() + limit
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + limit
+        inactivity = self._inactivity_timeout
         partial = ""
+        last_progress = None
+        last_change = loop.time()
         while True:
             reply, partial = await self._poll(pending, deadline)
             if reply is not None:
                 self._pending.pop(ref.message_id, None)
                 return reply
-            remaining = deadline - asyncio.get_running_loop().time()
+            now = loop.time()
+            if partial != last_progress:
+                last_progress = partial
+                last_change = now
+            if inactivity > 0 and now - last_change >= inactivity:
+                self._pending.pop(ref.message_id, None)
+                try:
+                    await self.cancel(pending.session_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("无进展超时后中止 OpenCode 会话失败：%s", exc)
+                raise AdapterTimeout(
+                    f"OpenCode 超过 {inactivity:.0f}s 没有新进展，已中止。最近进展：{partial[-800:]}"
+                )
+            remaining = deadline - now
             if remaining <= 0:
                 # 超时后尽量中止远端，避免挂起的工具/长驻命令一直占着会话
+                self._pending.pop(ref.message_id, None)
                 try:
                     await self.cancel(pending.session_id)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("超时后中止 OpenCode 会话失败：%s", exc)
                 raise AdapterTimeout(
-                    f"等待 OpenCode 响应超时（{limit}s）。已收到的内容：{partial[:300]}"
+                    f"等待 OpenCode 响应超时（{limit}s）。最近进展：{partial[-800:]}"
                 )
             await asyncio.sleep(min(self.settings.poll_interval, remaining))
 
@@ -337,14 +356,15 @@ class OpenCodeAdapter(AgentAdapter):
                 chosen, chosen_score, chosen_created = item, score, created
 
         if chosen is None:
-            return None, ""
+            return None, "等待 OpenCode 开始响应…"
         info = chosen.get("info") or {}
         text = self._extract_legacy_parts(chosen.get("parts") or [])
+        progress = self._legacy_progress(chosen.get("parts") or [], text)
         if info.get("error"):
             raise AdapterRemoteError(f"OpenCode 返回错误：{info['error']}")
         completed = bool((info.get("time") or {}).get("completed"))
         if not completed:
-            return None, text
+            return None, progress
         reply = AgentReply(
             session_id=pending.session_id,
             text=text,
@@ -365,6 +385,39 @@ class OpenCodeAdapter(AgentAdapter):
             if part.get("type") == "text" and not part.get("synthetic") and not part.get("ignored")
         ]
         return "\n".join(text for text in texts if text).strip()
+
+    @staticmethod
+    def _legacy_progress(parts: list[dict[str, Any]], text: str) -> str:
+        lines: list[str] = []
+        if text:
+            lines.append(text)
+        reasoning = sum(
+            len(part.get("text") or "") for part in parts if part.get("type") == "reasoning"
+        )
+        if reasoning:
+            lines.append(f"[思考中：{reasoning} 字]")
+        for part in parts:
+            if part.get("type") != "tool":
+                continue
+            state = part.get("state") or {}
+            status = state.get("status") or "unknown"
+            tool = part.get("tool") or "tool"
+            detail = ""
+            payload = state.get("input") or {}
+            if isinstance(payload, dict):
+                detail = (
+                    payload.get("command")
+                    or payload.get("filePath")
+                    or payload.get("pattern")
+                    or payload.get("description")
+                    or ""
+                )
+            if detail:
+                detail = " ".join(str(detail).split())[:160]
+                lines.append(f"[工具 {tool} {status}] {detail}")
+            else:
+                lines.append(f"[工具 {tool} {status}]")
+        return "\n".join(lines).strip()
 
     # ---- v2 polling -------------------------------------------------------
 
@@ -400,18 +453,20 @@ class OpenCodeAdapter(AgentAdapter):
             if item.get("type") == "assistant" and item.get("id") not in pending.baseline_assistant_ids
         ]
         if not candidates:
-            return None, ""
+            return None, "等待 OpenCode 开始响应…"
         chosen = max(candidates, key=lambda item: float((item.get("time") or {}).get("created") or 0))
+        content = chosen.get("content") or []
         text = "\n".join(
             part.get("text", "")
-            for part in chosen.get("content") or []
+            for part in content
             if part.get("type") == "text"
         ).strip()
+        progress = self._legacy_progress(content, text)
         if chosen.get("error"):
             raise AdapterRemoteError(f"OpenCode 返回错误：{chosen['error']}")
         finished = bool((chosen.get("time") or {}).get("completed")) or bool(chosen.get("finish"))
         if not finished:
-            return None, text
+            return None, progress
         reply = AgentReply(
             session_id=pending.session_id,
             text=text,

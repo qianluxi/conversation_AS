@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.10.1`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.10.2`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -363,7 +363,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 99 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 100 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）
@@ -406,6 +406,9 @@ OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选�
 - 生成类任务可能已经写出文件，但仍在跑验证命令；等待超时会标记失败。
   此时先检查工作目录里的产物，再决定是否强制释放/重试；超时后协调器会尝试中止
   OpenCode 会话，避免长驻命令继续占用。
+- OpenCode 等待有总超时（默认 600s）和无进展超时（`inactivity_timeout`，默认 300s）。
+  无新文本/工具状态时会提前中止，并在错误中显示最近工具和命令，避免长时间空等；
+  单条长命令可临时调大该值或设为 `0`。执行提示词已禁止截图/浏览器/GUI 等易挂起操作。
 
 ## 后续（阶段三）
 
