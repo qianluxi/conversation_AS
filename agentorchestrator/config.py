@@ -252,6 +252,10 @@ class StorageSettings(BaseModel):
 
 class VerificationSettings(BaseModel):
     exclude_dirs: list[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDE_DIRS))
+    max_files: int = 50_000
+    max_total_bytes: int = 512 * 1024 * 1024
+    max_file_bytes: int = 64 * 1024 * 1024
+    scan_timeout: float = 30.0
 
 
 class AppConfig(BaseModel):

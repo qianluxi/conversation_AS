@@ -325,3 +325,73 @@ def test_permission_broker_roundtrip_with_acp() -> None:
                 await adapter.aclose()
 
     run(scenario())
+
+def test_late_chunk_after_uncertain_stays_with_old_prompt() -> None:
+    import asyncio
+
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=3, poll_interval=0.01,
+    )
+    transport = FakeACPTransport("Write file", prompt_status=500)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                with pytest.raises(AdapterUncertain):
+                    await adapter.send_message(session_id, "one")
+                old_state = adapter._active_by_session.get("t1")
+                assert old_state is not None
+                transport.push({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "t1",
+                    "update": {"sessionUpdate": "agent_message_chunk",
+                               "content": {"type": "text", "text": "late"}},
+                }})
+                await asyncio.sleep(0.05)
+                assert "late" in "".join(old_state.parts)
+                with pytest.raises(AdapterError):
+                    await adapter.send_message(session_id, "two")
+                await adapter.cancel_wait(session_id)
+            finally:
+                await adapter.aclose()
+
+    run(scenario())
+
+
+def test_failed_rpc_post_clears_pending() -> None:
+    import asyncio
+
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=3, poll_interval=0.01,
+    )
+    transport = FakeACPTransport("Write file")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                task = adapter._sessions[session_id].task
+
+                async def fail_post(payload, *, task=None, retry_auth=True):
+                    raise AdapterError("post failed")
+
+                adapter._post_acp = fail_post
+                with pytest.raises(AdapterError):
+                    await adapter._rpc("initialize", {}, timeout=0.1, task=task)
+                assert adapter._pending_rpc == {}
+            finally:
+                await adapter.aclose()
+
+    run(scenario())

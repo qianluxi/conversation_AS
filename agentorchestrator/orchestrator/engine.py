@@ -210,7 +210,7 @@ class Conversation:
                 outgoing.message_id, status=MessageStatus.CANCELLED, error="cancelled",
             )
             if step is not None:
-                self.store.finish_step(step.step_id, StepState.FAILED, error="cancelled")
+                self.store.finish_step(step.step_id, StepState.CANCELLED, error="cancelled")
                 self.event("step_failed", step_id=step.step_id,
                            payload={"message_id": outgoing.message_id,
                                     "error_type": "cancelled"})
@@ -532,7 +532,8 @@ async def run_collaboration(conversation: Conversation, *,
                             timeout: float | None = None,
                             workspace: str | None = None,
                             read_only: bool = False,
-                            verification_excludes: list[str] | None = None) -> dict[str, Any]:
+                            verification_excludes: list[str] | None = None,
+                            verification_limits: dict[str, Any] | None = None) -> dict[str, Any]:
     """结构化流程：分析 -> 执行 -> 结构化审查；支持从持久化检查点继续。"""
     reviewer = reviewer or planner
     workflow = conversation.get_workflow()
@@ -669,6 +670,7 @@ async def run_collaboration(conversation: Conversation, *,
                 conversation.set_phase(RunPhase.EXECUTING)
                 verification_before = capture_workspace(
                     workspace, exclude_dirs=verification_excludes,
+                    **(verification_limits or {}),
                 )
                 workflow["verification_before"] = verification_before
                 conversation.save_workflow(workflow, event_type="workflow_node_work")
@@ -693,6 +695,7 @@ async def run_collaboration(conversation: Conversation, *,
                 work_text = work_reply.text
                 verification_after = capture_workspace(
                     workspace, exclude_dirs=verification_excludes,
+                    **(verification_limits or {}),
                 )
                 changed = workspace_changed(verification_before, verification_after)
                 workflow.update(

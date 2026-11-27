@@ -13,7 +13,7 @@
 | OpenCode | 1.19.0 |
 | WorkBuddy Desktop | 2.165.0 |
 | 模型 | `opencode-go/deepseek-v4.1-flash` |
-| 协调器 | conversation_AS 0.6.x ~ 0.10.0 |
+| 协调器 | conversation_AS 0.6.x ~ 0.10.1 |
 
 ## OpenCode
 
@@ -62,8 +62,8 @@
 - `ask` 权限通过 Web UI 的 `/api/permissions` 挂起确认，120 秒超时拒绝；
 - `auto_approve` 只选择 `allow_once`；
 - 取消运行会尝试 OpenCode abort / ACP session/cancel，并把 run 标记 `cancelled`；
-- 只读验证增加文件树内容 SHA-256，覆盖 git 忽略文件；非 git 工作区返回
-  `verification_unavailable` 并停止只读运行。
+- 只读验证增加文件内容 SHA-256、符号链接目标、扫描限制与统计；非 git 工作区
+  或扫描超限返回 `verification_unavailable` 并停止只读运行。
 - ACP 不确定提交进入 QUARANTINED，保持会话锁，禁止后续 prompt 覆盖流式消息归属。
 
 ### 官方 OAuth 本地助理 / 云端 ACP

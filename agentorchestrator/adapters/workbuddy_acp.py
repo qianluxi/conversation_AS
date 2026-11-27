@@ -291,11 +291,11 @@ class WorkBuddyAcpAdapter(AgentAdapter):
         rpc_id = self._next_id()
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_rpc[rpc_id] = future
-        await self._post_acp(
-            {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
-            task=task or self._current_task(),
-        )
         try:
+            await self._post_acp(
+                {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params},
+                task=task or self._current_task(),
+            )
             return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise AdapterTimeout(f"ACP {method} 等待响应超时（{timeout}s）") from exc

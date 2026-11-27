@@ -380,4 +380,6 @@ def test_cancelled_run_is_marked_cancelled(tmp_path: Path) -> None:
     messages = store.list_messages(conversation.run_id)
     worker_messages = [m for m in messages if m.to_agent == "worker"]
     assert worker_messages and worker_messages[0].status is MessageStatus.CANCELLED
+    worker_steps = [s for s in store.list_steps(conversation.run_id) if s.role == "worker"]
+    assert worker_steps and worker_steps[0].state is StepState.CANCELLED
     store.close()

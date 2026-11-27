@@ -147,8 +147,10 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 “检查代码/项目”时不需要再粘贴代码，执行者应在该目录内直接使用工具检查。
 
 协调器还会在 Worker 前后独立执行 `git HEAD/status/diff` 快照，并对纳入范围的
-文件计算内容 SHA-256（覆盖被 git 忽略的文件），结果写入 Reviewer 提示词。
-排除目录可通过 `verification.exclude_dirs` 配置，界面会显示排除范围。
+文件计算内容 SHA-256（覆盖被 git 忽略的文件；目录符号链接记录路径与目标）。
+扫描有文件数、总字节、单文件大小和超时限制，超限或快照不可用会返回
+`verification_unavailable`。排除目录与限制通过 `verification.*` 配置，界面会
+显示扫描统计与排除范围。
 当执行角色是 `plan` 时，如果快照发生变化（修改、新增、删除文件或新 commit），
 本次运行会以 `read_only_violation` 失败；快照不可用则以
 `verification_unavailable` 失败，不进入审查。

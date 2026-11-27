@@ -339,6 +339,7 @@ def create_app(config: AppConfig, store: Store,
                     workspace=directory,
                     read_only=payload.opencode_agent == "plan",
                     verification_excludes=cfg.verification.exclude_dirs,
+                    verification_limits=cfg.verification.model_dump(exclude={"exclude_dirs"}),
                 )
             except Exception as exc:  # noqa: BLE001 - 记录到 UI
                 handle.error = f"{type(exc).__name__}: {exc}"
@@ -459,6 +460,7 @@ def create_app(config: AppConfig, store: Store,
                     max_rounds=max_rounds, goal=goal, timeout=timeout,
                     workspace=workspace, read_only=read_only,
                     verification_excludes=cfg.verification.exclude_dirs,
+                    verification_limits=cfg.verification.model_dump(exclude={"exclude_dirs"}),
                 )
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"

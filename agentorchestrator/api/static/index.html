@@ -83,6 +83,7 @@
   .b-completed, .b-approved { color: var(--ok); border-color: #1e5c43; }
   .b-failed, .b-blocked { color: var(--bad); border-color: #6b2c2e; }
   .b-unknown, .b-quarantined, .b-revision_required, .b-recovering { color: var(--warn); border-color: #6b5426; }
+  .b-cancelled, .b-canceled { color: var(--warn); border-color: #6b5426; }
   .b-running, .b-created, .b-sent, .b-acknowledged, .b-sending { color: var(--accent); border-color: #234d79; }
   .review { margin: 14px 0; padding: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2); }
   .review.approved { border-color: #1e5c43; }
@@ -518,15 +519,16 @@ function renderVerification(data) {
   const changed = evidence.changed;
   const label = changed === true ? "检测到变化" : (changed === false ? "无变化" : "无法判断");
   const excludes = (evidence.exclude_dirs || before.exclude_dirs || []).join(", ");
+  const scan = `${before.files ?? 0} files / ${before.bytes ?? 0} bytes / ${before.elapsed_seconds ?? 0}s`;
   if (before.available === false) {
     box.innerHTML = `<div class="verify-card">
       <strong>工作区校验不可用（${esc(before.reason || "unknown")}）</strong>
-      <div class="muted">排除目录：${esc(excludes)}</div>
+      <div class="muted">排除目录：${esc(excludes)}；扫描：${esc(scan)}</div>
     </div>`;
     return;
   }
   box.innerHTML = `<details class="verify-card">
-    <summary>工作区校验：${esc(label)}（排除目录：${esc(excludes)}）</summary>
+    <summary>工作区校验：${esc(label)}（${esc(scan)}；排除：${esc(excludes)}）</summary>
     <pre>HEAD: ${esc(before.head || "(no commit)")} → ${esc(after.head || "(no commit)")}
 status:
 ${esc(before.status || "clean")}

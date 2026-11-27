@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.10.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.10.1`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -194,7 +194,10 @@ Reviewer 提示词和 `workflow.verification`。这不依赖模型自报的证�
 
 文件树指纹默认排除 `.git`、`data`、`logs`、`.venv`、`node_modules` 等目录
 （可通过 `verification.exclude_dirs` 配置，并在 UI 校验信息中展示）；
-`plan` 的原生只读权限仍是第一道边界，快照是第二道独立检查，不等于完整文件系统沙箱。
+目录符号链接会以“路径 + readlink 目标”纳入指纹，不跟随读取外部目录。
+扫描有文件数/总字节/单文件大小/超时限制（`verification.max_*`、
+`scan_timeout`），超限返回 `verification_unavailable`，不会跳过文件后仍宣称通过。
+UI 会显示扫描文件数、字节数和耗时。
 
 ### 6. 工具权限：token/能力匹配
 
@@ -360,7 +363,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 95 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 99 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）

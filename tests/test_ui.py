@@ -322,6 +322,6 @@ def test_cancel_active_run(tmp_path: Path, monkeypatch) -> None:
             worker_messages = [m for m in data["messages"] if m["to_agent"] == "worker"]
             assert worker_messages and worker_messages[0]["status"] == "cancelled"
             worker_steps = [s for s in data["steps"] if s["role"] == "worker"]
-            assert worker_steps and worker_steps[0]["state"] == "failed"
+            assert worker_steps and worker_steps[0]["state"] == "cancelled"
     finally:
         store.close()

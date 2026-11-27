@@ -200,3 +200,34 @@ def test_git_command_failure_marks_unavailable(tmp_path: Path, monkeypatch) -> N
     snapshot = capture_workspace(repo)
     assert snapshot["available"] is False
     assert snapshot["reason"] == "git_command_failed"
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_symlink_target_change_is_detected(tmp_path: Path) -> None:
+    import os
+
+    repo = tmp_path / "repo-link"
+    repo.mkdir()
+    _make_repo(repo)
+    try:
+        os.symlink("a.txt", repo / "link.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not supported")
+    before = capture_workspace(repo)
+    (repo / "link.txt").unlink()
+    try:
+        os.symlink("other.txt", repo / "link.txt")
+    except OSError:
+        pytest.skip("symlink not supported")
+    after = capture_workspace(repo)
+    assert workspace_changed(before, after) is True
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_scan_limit_marks_unavailable(tmp_path: Path) -> None:
+    repo = tmp_path / "repo-limit"
+    repo.mkdir()
+    _make_repo(repo)
+    snapshot = capture_workspace(repo, max_file_bytes=1)
+    assert snapshot["available"] is False
+    assert snapshot["reason"] == "file_too_large"
+    assert snapshot["files"] == 0

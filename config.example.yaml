@@ -80,5 +80,9 @@ storage:
 verification:
   exclude_dirs: [.git, data, logs, __pycache__, .pytest_cache, .mypy_cache,
                  .ruff_cache, .venv, venv, node_modules, dist, build]
+  max_files: 50000
+  max_total_bytes: 536870912
+  max_file_bytes: 67108864
+  scan_timeout: 30
 
 log_level: INFO
