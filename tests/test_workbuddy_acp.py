@@ -6,7 +6,12 @@ from typing import Any
 import httpx
 import pytest
 
-from agentorchestrator.adapters.base import AdapterError, AdapterRemoteError, AdapterUncertain
+from agentorchestrator.adapters.base import (
+    AdapterError,
+    AdapterRemoteError,
+    AdapterTimeout,
+    AdapterUncertain,
+)
 from agentorchestrator.adapters.workbuddy_acp import AcpPhase, WorkBuddyAcpAdapter
 from agentorchestrator.config import PermissionSettings, WorkBuddyAcpSettings
 
@@ -36,13 +41,14 @@ class FakeACPTransport(httpx.AsyncBaseTransport):
     """模拟 WorkBuddy 控制面 + ACP SSE 通道。"""
 
     def __init__(self, permission_title: str = "Write file",
-                 prompt_status: int = 200) -> None:
+                 prompt_status: int = 200, auto_reply: bool = True) -> None:
         import asyncio
 
         self.queue: Any = asyncio.Queue()
         self.requests: list[tuple[httpx.Request, dict[str, Any]]] = []
         self.permission_title = permission_title
         self.prompt_status = prompt_status
+        self.auto_reply = auto_reply
 
     def push(self, payload: dict[str, Any]) -> None:
         self.queue.put_nowait(_sse(payload))
@@ -78,6 +84,8 @@ class FakeACPTransport(httpx.AsyncBaseTransport):
         elif method == "session/prompt":
             if self.prompt_status >= 400:
                 return httpx.Response(self.prompt_status, json={"error": "boom"})
+            if not self.auto_reply:
+                return httpx.Response(200, json={})
             self.push({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "t1",
                 "update": {"sessionUpdate": "agent_message_chunk",
@@ -391,6 +399,85 @@ def test_failed_rpc_post_clears_pending() -> None:
                 with pytest.raises(AdapterError):
                     await adapter._rpc("initialize", {}, timeout=0.1, task=task)
                 assert adapter._pending_rpc == {}
+            finally:
+                await adapter.aclose()
+
+    run(scenario())
+
+def test_chunks_extend_acp_activity_window() -> None:
+    import asyncio
+
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=2, poll_interval=0.01,
+        inactivity_timeout=0.15,
+    )
+    transport = FakeACPTransport(auto_reply=False)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                ref = await adapter.send_message(session_id, "hi")
+                prompt_id = next(
+                    body["id"] for _request, body in transport.requests
+                    if body.get("method") == "session/prompt"
+                )
+
+                async def pump() -> None:
+                    for char in "abcd":
+                        await asyncio.sleep(0.08)
+                        transport.push({"jsonrpc": "2.0", "method": "session/update", "params": {
+                            "sessionId": "t1",
+                            "update": {"sessionUpdate": "agent_message_chunk",
+                                       "content": {"type": "text", "text": char}},
+                        }})
+                    transport.push({"jsonrpc": "2.0", "id": prompt_id,
+                                    "result": {"stopReason": "end_turn", "usage": {}}})
+
+                task = asyncio.create_task(pump())
+                reply = await adapter.wait_response(ref, timeout=2)
+                assert reply.text == "abcd"
+                task.cancel()
+            finally:
+                await adapter.aclose()
+
+    run(scenario())
+
+def test_active_acp_tool_prevents_idle_timeout() -> None:
+    import asyncio
+
+    settings = WorkBuddyAcpSettings(
+        base_url="https://control.test", bootstrap_prompt="boot",
+        cwd="/workspace", timeout=0.4, poll_interval=0.01,
+        inactivity_timeout=0.1,
+    )
+    transport = FakeACPTransport(auto_reply=False)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=transport) as control, \
+                httpx.AsyncClient(transport=transport) as acp:
+            adapter = WorkBuddyAcpAdapter(
+                "wb_acp", settings, auth=FakeAuth(),
+                control_client=control, acp_client=acp,
+            )
+            try:
+                session_id = await adapter.create_session("run1")
+                ref = await adapter.send_message(session_id, "hi")
+                transport.push({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "t1",
+                    "update": {"sessionUpdate": "tool_call",
+                               "toolCallId": "tool-1", "status": "in_progress"},
+                }})
+                with pytest.raises(AdapterTimeout) as excinfo:
+                    await adapter.wait_response(ref, timeout=0.4)
+                assert "达到上限" in str(excinfo.value)
+                assert "没有新活动" not in str(excinfo.value)
             finally:
                 await adapter.aclose()
 

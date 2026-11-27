@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from ..adapters import build_adapters
-from ..adapters.base import AdapterError
+from ..adapters.base import AdapterError, AdapterTimeout
 from ..config import AppConfig
 from ..orchestrator.engine import Conversation, run_collaboration
 from ..messaging.schema import RunPhase, RunStatus
@@ -47,6 +47,11 @@ class ReleaseRequest(BaseModel):
     message_id: str
     force: bool = False
     timeout: float | None = Field(default=None, gt=0)
+
+
+class WaitRequest(BaseModel):
+    message_id: str | None = None
+    timeout: float = Field(default=600.0, gt=0, le=7200)
 
 
 class ContinueRequest(BaseModel):
@@ -565,6 +570,56 @@ def create_app(config: AppConfig, store: Store,
         finally:
             await conversation.close()
         return {"results": results, "run": _json(store.get_run(run_id))}
+
+    @app.post("/api/runs/{run_id}/wait")
+    async def wait_run(run_id: str, payload: WaitRequest | None,
+                       request: Request) -> dict[str, Any]:
+        _ensure_not_active(request, run_id)
+        cfg: AppConfig = request.app.state.config
+        store: Store = request.app.state.store
+        if store.get_run(run_id) is None:
+            raise HTTPException(404, f"未知 run_id: {run_id}")
+        options = payload or WaitRequest()
+        adapters = build_adapters(cfg)
+        try:
+            conversation = Conversation(store, adapters, run_id=run_id)
+        except Exception:
+            for adapter in adapters.values():
+                await adapter.aclose()
+            raise
+        try:
+            message = await conversation.wait_unknown(
+                options.message_id, timeout=options.timeout,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except AdapterTimeout as exc:
+            raise HTTPException(408, str(exc)) from exc
+        except (AdapterError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        finally:
+            await conversation.close()
+        return {"message": _json(message), "run": _json(store.get_run(run_id))}
+
+    @app.post("/api/runs/{run_id}/abort")
+    async def abort_run(run_id: str, request: Request) -> dict[str, Any]:
+        _ensure_not_active(request, run_id)
+        cfg: AppConfig = request.app.state.config
+        store: Store = request.app.state.store
+        if store.get_run(run_id) is None:
+            raise HTTPException(404, f"未知 run_id: {run_id}")
+        adapters = build_adapters(cfg)
+        try:
+            conversation = Conversation(store, adapters, run_id=run_id)
+        except Exception:
+            for adapter in adapters.values():
+                await adapter.aclose()
+            raise
+        try:
+            await conversation.abort_remote()
+        finally:
+            await conversation.close()
+        return {"run_id": run_id, "run": _json(store.get_run(run_id))}
 
     @app.post("/api/runs/{run_id}/release")
     async def release_message(run_id: str, payload: ReleaseRequest,

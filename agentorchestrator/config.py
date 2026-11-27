@@ -174,8 +174,10 @@ class OpencodeSettings(BaseModel):
     agent: str | None = None
     provider_id: str | None = None
     model_id: str | None = None
-    timeout: float = 600.0
-    inactivity_timeout: float = 300.0
+    timeout: float = 3600.0
+    request_timeout: float = 30.0
+    cancel_timeout: float = 8.0
+    inactivity_timeout: float = 0.0
     poll_interval: float = 1.0
     verify_ssl: bool = True
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
@@ -189,7 +191,7 @@ class WorkBuddyLocalSettings(BaseModel):
     redirect_uri: str = ""
     scope: str = "user.localassistant.readable user.localassistant.invokable"
     token_file: str = "data/workbuddy_token.json"
-    timeout: float = 300.0
+    timeout: float = 3600.0
     poll_interval: float = 2.0
     verify_ssl: bool = True
     lock_file: str = "data/workbuddy_local.lock"
@@ -206,7 +208,8 @@ class WorkBuddyAcpSettings(BaseModel):
     token_file: str = "data/workbuddy_token.json"
     bootstrap_prompt: str = "初始化协作会话，请等待后续指令。"
     cwd: str = "/workspace"
-    timeout: float = 600.0
+    timeout: float = 3600.0
+    inactivity_timeout: float = 0.0
     poll_interval: float = 2.0
     auto_approve: bool = False
     verify_ssl: bool = True
@@ -224,7 +227,7 @@ class WorkBuddyIpcSettings(BaseModel):
     client_kind: str = "skill"
     model: str = "auto"
     chat_path: str = "/v2/chat/completions"
-    timeout: float = 300.0
+    timeout: float = 3600.0
     history_limit: int = 20
     library_path: str | None = None
 

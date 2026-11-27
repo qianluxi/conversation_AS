@@ -40,6 +40,7 @@ def test_ui_page_and_mock_run(tmp_path: Path) -> None:
             assert "开始协作" in page.text
             assert "取消运行" in page.text
             assert "需要工具授权" in page.text
+            assert "继续等待" in page.text
             assert client.get("/api/permissions").json() == []
             assert client.post(
                 "/api/permissions/not-found", json={"decision": "deny"}
@@ -82,6 +83,8 @@ def test_ui_page_and_mock_run(tmp_path: Path) -> None:
             assert client.get("/api/pending").json() == []
             assert client.get("/api/runs/does-not-exist").status_code == 404
             assert client.post(f"/api/runs/{run_id}/cancel", json={}).status_code == 409
+            assert client.post(f"/api/runs/{run_id}/wait", json={}).status_code == 404
+            assert client.post(f"/api/runs/{run_id}/abort").status_code == 200
     finally:
         store.close()
 

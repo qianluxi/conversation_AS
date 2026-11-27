@@ -63,6 +63,10 @@ class _PromptState:
     rpc_id: int
     future: asyncio.Future[dict[str, Any]]
     parts: list[str] = field(default_factory=list)
+    started_at: float = 0.0
+    last_activity_at: float = 0.0
+    last_event: str = ""
+    active_tools: set[str] = field(default_factory=set)
 
 
 class WorkBuddyAcpAdapter(AgentAdapter):
@@ -359,7 +363,25 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             return
         params = message.get("params") or {}
         update = params.get("update") or {}
-        if update.get("sessionUpdate") != "agent_message_chunk":
+        state = self._active_by_session.get(params.get("sessionId") or "")
+        if state is None:
+            return
+        loop = asyncio.get_running_loop()
+        state.last_activity_at = loop.time()
+        kind = str(update.get("sessionUpdate") or "")
+        state.last_event = kind
+        tool_call = update.get("toolCall") or {}
+        tool_id = str(
+            update.get("toolCallId") or tool_call.get("toolCallId")
+            or tool_call.get("id") or ""
+        )
+        status = str(update.get("status") or tool_call.get("status") or "").lower()
+        if kind in {"tool_call", "tool_call_update", "tool_call_progress"} and tool_id:
+            if status in {"completed", "failed", "cancelled", "canceled", "error"}:
+                state.active_tools.discard(tool_id)
+            else:
+                state.active_tools.add(tool_id)
+        if kind != "agent_message_chunk":
             return
         content = update.get("content")
         chunks: list[str] = []
@@ -370,9 +392,7 @@ class WorkBuddyAcpAdapter(AgentAdapter):
                 item.get("text") or "" for item in content
                 if isinstance(item, dict) and item.get("type") == "text"
             )
-        state = self._active_by_session.get(params.get("sessionId") or "")
-        if state is not None:
-            state.parts.extend(chunk for chunk in chunks if chunk)
+        state.parts.extend(chunk for chunk in chunks if chunk)
 
     async def _handle_server_request(self, message: dict[str, Any]) -> None:
         method = message.get("method")
@@ -466,9 +486,11 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             task = session.task
             assert task is not None
             rpc_id = self._next_id()
+            now = asyncio.get_running_loop().time()
             state = _PromptState(
                 session_id=session_id, task_id=task.task_id, rpc_id=rpc_id,
                 future=asyncio.get_running_loop().create_future(),
+                started_at=now, last_activity_at=now, last_event="session/prompt",
             )
             self._prompts[rpc_id] = state
             self._active_by_session[task.task_id] = state
@@ -510,25 +532,47 @@ class WorkBuddyAcpAdapter(AgentAdapter):
             raise AdapterError(f"未知的 ACP 消息引用：{ref.message_id}")
         session = self._sessions.get(state.session_id)
         limit = timeout if timeout is not None else self.settings.timeout
-        try:
-            result = await asyncio.wait_for(asyncio.shield(state.future), timeout=limit)
-        except asyncio.TimeoutError as exc:
-            # 远端可能仍在执行：保留会话锁与 active 状态，等待 cancel/abort 或人工处理
-            if session is not None:
-                session.state = AcpPhase.QUARANTINED
-            raise AdapterTimeout(f"等待 WorkBuddy ACP 响应超时（{limit}s）") from exc
-        except asyncio.CancelledError:
-            if session is not None:
-                session.state = AcpPhase.CANCELLED
-            self._cleanup_prompt(state)
-            lock = self._locks.get(ref.session_id)
-            if lock is not None and lock.locked():
-                lock.release()
-            raise
-        except Exception:
-            if session is not None:
-                session.state = AcpPhase.QUARANTINED
-            raise
+        inactivity = self.settings.inactivity_timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + limit
+        result: dict[str, Any]
+        while True:
+            now = loop.time()
+            if (inactivity > 0 and not state.active_tools
+                    and now - state.last_activity_at >= inactivity):
+                if session is not None:
+                    session.state = AcpPhase.QUARANTINED
+                raise AdapterTimeout(
+                    f"WorkBuddy ACP 超过 {inactivity:.0f}s 没有新活动；"
+                    f"已停止本地等待，远端可能仍在执行。最近事件：{state.last_event or 'unknown'}"
+                )
+            remaining = deadline - now
+            if remaining <= 0:
+                if session is not None:
+                    session.state = AcpPhase.QUARANTINED
+                raise AdapterTimeout(
+                    f"等待 WorkBuddy ACP 响应达到上限（{limit}s）；"
+                    f"已停止本地等待，远端可能仍在执行。最近事件：{state.last_event or 'unknown'}"
+                )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(state.future), timeout=min(0.5, remaining),
+                )
+                break
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                if session is not None:
+                    session.state = AcpPhase.CANCELLED
+                self._cleanup_prompt(state)
+                lock = self._locks.get(ref.session_id)
+                if lock is not None and lock.locked():
+                    lock.release()
+                raise
+            except Exception:
+                if session is not None:
+                    session.state = AcpPhase.QUARANTINED
+                raise
         self._cleanup_prompt(state)
         if session is not None:
             session.state = AcpPhase.IDLE

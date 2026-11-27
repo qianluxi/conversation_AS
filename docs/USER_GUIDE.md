@@ -79,7 +79,10 @@ agents:
     password: ${OPENCODE_SERVER_PASSWORD}
     api_style: legacy        # 兼容性最好；1.19+ 也可改 v2
     delivery: async
-    timeout: 300
+    timeout: 3600
+    request_timeout: 30
+    cancel_timeout: 8
+    inactivity_timeout: 0
     poll_interval: 1
 storage:
   path: data/orchestrator.db
@@ -186,7 +189,7 @@ agents:
   workbuddy:
     type: workbuddy_ipc
     model: auto
-    timeout: 300
+    timeout: 3600
     history_limit: 20
 ```
 
@@ -250,7 +253,8 @@ agents:
     token_file: data/workbuddy_token.json
     bootstrap_prompt: "初始化协作会话，请等待后续指令。"
     cwd: /workspace
-    timeout: 600
+    timeout: 3600
+    inactivity_timeout: 0
     poll_interval: 2
     auto_approve: false
     permissions:
@@ -306,14 +310,15 @@ python -m agentorchestrator --config config.yaml ui
 
 - 检查 agent 连接；
 - 填写任务目标，选择 Planner / Worker / Reviewer、**OpenCode 工作目录**、
-  **OpenCode 模型**、**执行角色**、最大轮数与超时并启动协作；
+  **OpenCode 模型**、**执行角色**、最大轮数与**单次 Agent 响应超时**并启动协作；
   模型下拉默认优先选择已配置的 `opencode-go` 模型，工作目录默认取启动 UI 的目录；
   执行角色默认 `plan`（只读）；需要改代码时切到 `build`；
 - 实时查看运行状态、步骤耗时、消息全文、状态机事件和结构化审查结果；
 - **执行结果 / 最终交付物**显示在运行详情顶部，可一键复制；审查卡只显示判定；
 - ACP 工具授权会弹出确认（允许一次/允许/拒绝，超时拒绝）；
 - 运行中可以「取消运行」，会尝试中止远端 Agent 并把 run 标记为 `cancelled`；
-- 在「待处理 / 隔离消息」中执行核对恢复或强制释放；
+- 在「待处理 / 隔离消息」中可「继续等待」原任务、「核对恢复」、「中止远端」或
+  强制释放；默认不重发、不自动中止远端。
 - 从历史运行列表点击回看。
 
 默认只监听 `127.0.0.1`。如果改成非回环地址（例如 `--host 0.0.0.0`），必须提供
@@ -439,16 +444,19 @@ python -m agentorchestrator --config config.yaml events --run-id <id>
 ```
 
 生成类任务常见情况：文件其实已经写入工作目录，但模型还在跑验证命令，导致等待超时。
-先检查工作目录和时间戳，再决定是否释放。OpenCode 超时后协调器会尝试中止远端会话；
-默认总超时 600 秒，可在界面「超时」中按任务调大。
+先检查工作目录和时间戳，再决定下一步。等待超时只停止本地等待，**不会自动中止远端
+任务**：
 
-另外有“无进展超时”（默认 300 秒，`opencode.inactivity_timeout`）：如果连续
-300 秒没有新的文本或工具状态变化，会提前中止，并在错误里显示最近运行的命令/工具，
-避免只看到空的“已收到内容”。正在执行的单条命令本身可能在运行，但状态不变也会触发；
-确实需要跑 5 分钟以上的单条命令时，可临时调大该值或设为 `0` 关闭。
-
-为减少挂起，执行提示词已禁止读取/生成截图、启动浏览器/GUI/服务器，并要求单条命令
-尽量控制在 60 秒内；复杂验证请拆成小步骤。
+- OpenCode 会保留 `provider_message_id`，可在「待处理 / 隔离消息」点「继续等待」，
+  继续等待原任务而不是重发；也可以「核对恢复」或明确「中止远端」。
+- WorkBuddy ACP 超时后进入隔离并保留会话锁，不会自动中止；核对远端后再恢复或中止。
+- 默认单次 Agent 响应超时 3600 秒，可在界面按任务调到 7200 秒；Planner / Worker /
+  Reviewer 分别计时。
+- HTTP 查询请求有独立的 30 秒上限，取消请求默认 8 秒，避免轮询或取消接口绕过总截止时间。
+- `opencode.inactivity_timeout` 默认 0（关闭）。即使开启，也只在没有运行中工具时生效，
+  `npm install`、构建、完整测试等长命令不会因暂时无输出被误杀。
+- 执行提示词允许合理的长时间安装/构建/测试，但要求保存输出日志并检查退出码；仍禁止
+  截图、浏览器/GUI 等容易挂起的操作。
 
 处理：
 

@@ -347,14 +347,18 @@ class Conversation:
                      allow_resend_unstarted: bool = False) -> list[dict[str, Any]]:
         """核对未完成消息的外部状态；默认绝不重发可能已执行的消息。"""
         self._refresh()
-        if self.run.status is not RunStatus.RUNNING or self.run.phase in TERMINAL_PHASES:
-            return []
         unfinished = self.store.list_unfinished_messages(self.run_id)
         self._reconcile_steps()
         if not unfinished:
             return []
-        self.set_phase(RunPhase.RECOVERING, event_type="run_recovering",
-                       payload={"pending": len(unfinished)})
+        if self.run.status is RunStatus.COMPLETED:
+            return []
+        active = self.run.status is RunStatus.RUNNING
+        if active and self.run.phase not in TERMINAL_PHASES:
+            self.set_phase(RunPhase.RECOVERING, event_type="run_recovering",
+                           payload={"pending": len(unfinished)})
+        else:
+            self.event("run_recovering", payload={"pending": len(unfinished)})
         results: list[dict[str, Any]] = []
         for message in unfinished:
             adapter = self.adapters.get(message.to_agent)
@@ -368,9 +372,9 @@ class Conversation:
             step = self.store.get_step(step_id) if step_id else None
 
             if not message.provider_message_id:
-                if allow_resend_unstarted and message.status in (
+                if (active and allow_resend_unstarted and message.status in (
                     MessageStatus.CREATED, MessageStatus.PENDING,
-                ) and message.attempt == 0:
+                ) and message.attempt == 0):
                     try:
                         if step is not None and step.started_at is None:
                             self.store.start_step(step.step_id)
@@ -407,6 +411,65 @@ class Conversation:
             results.append({"message_id": message.message_id, "action": "recovered",
                             "text": completed.text})
         return results
+
+    async def wait_unknown(self, message_id: str | None = None, *,
+                           timeout: float | None = None) -> Message:
+        """继续等待一条已标记 UNKNOWN 的消息，不重发、不自动中止远端。"""
+        self._refresh()
+        if message_id:
+            message = self.store.get_message(message_id)
+            candidates = [message] if message is not None else []
+        else:
+            candidates = [
+                message for message in self.store.list_unfinished_messages(self.run_id)
+                if message.provider_message_id
+            ]
+        if not candidates:
+            raise KeyError("没有可继续等待的未知消息")
+        message = candidates[0]
+        assert message is not None
+        if message.run_id != self.run_id:
+            raise ValueError(f"消息 {message.message_id} 不属于 run {self.run_id}")
+        if message.status is MessageStatus.COMPLETED:
+            return message
+        if not message.provider_message_id:
+            raise AdapterError("该消息没有远端消息 ID，无法继续等待")
+        reply_message = self.store.find_reply(message.message_id)
+        if reply_message is not None:
+            return message
+
+        adapter = self.adapters.get(message.to_agent)
+        binding = self.store.get_binding(self.run_id, message.to_agent)
+        if adapter is None or binding is None:
+            raise AdapterError("缺少适配器或会话绑定，无法继续等待")
+
+        step_id = (message.metadata or {}).get("step_id")
+        step = self.store.get_step(step_id) if step_id else None
+        ref = MessageRef(
+            session_id=binding.provider_session_id,
+            message_id=message.provider_message_id,
+            metadata=(message.metadata or {}).get("ref") or {},
+        )
+        self.event("message_wait_resumed", step_id=step_id,
+                   payload={"message_id": message.message_id})
+        try:
+            reply = await adapter.wait_response(ref, timeout=timeout)
+        except AdapterTimeout as exc:
+            self.store.update_message(message.message_id, error=str(exc))
+            raise
+        completed = self._complete(message, reply, binding, step)
+        self.event("message_recovered", step_id=step_id, payload={
+            "message_id": message.message_id, "text": completed.text[:200],
+            "action": "continued_wait",
+        })
+        refreshed = self.store.get_message(message.message_id)
+        assert refreshed is not None
+        return refreshed
+
+    async def abort_remote(self) -> None:
+        """用户明确请求中止时，尽力停止远端执行；不改变本地消息状态。"""
+        await self.cancel_inflight()
+        self.event("remote_abort_requested", payload={})
 
     def transcript(self) -> list[Message]:
         return self.store.list_messages(self.run_id)
@@ -627,7 +690,7 @@ async def run_collaboration(conversation: Conversation, *,
                 "- 不要写“等待用户提供代码”，也不要向用户提问或要求确认；\n"
                 "- 只给出步骤、检查项、期望结果与判定标准；\n"
                 "- 不要把截图、浏览器打开页面、GUI/游戏窗口作为验证手段；"
-                "验证应设计成静态检查或 60 秒内可退出的命令行测试；\n"
+                "验证应设计成静态检查或可分阶段执行的命令行测试；\n"
                 "- 如果任务很简单（例如只输出一行文本），方案必须保持极简，"
                 "不要扩展交付物、检查清单或额外字段；\n"
                 "- 只做方案，不要修改代码。\n"
@@ -687,8 +750,10 @@ async def run_collaboration(conversation: Conversation, *,
                     "如果方案包含对仓库现状的断言，必须先实际读取/执行验证，以工具结果为准。\n"
                     "不要运行可能长时间阻塞或常驻的命令（启动服务、打开浏览器、GUI、"
                     "交互式程序、文件监视器）；不要读取/生成截图或图片，验证优先用静态检查"
-                    "或短时命令行测试；验证命令应快速退出，单条命令不要超过 60 秒，"
-                    "命令长时间无输出时立即终止并换一种做法。\n"
+                    "或短时命令行测试。\n"
+                    "优先使用可分阶段执行的命令。预计运行较久的命令（安装依赖、完整测试、"
+                    "构建、迁移）可以正常执行，但应尽量保存输出日志、在完成后检查退出码；"
+                    "不要仅因暂时没有标准输出就判定命令挂起。\n"
                     f"【任务方案】\n{plan}\n"
                     f"【上一轮审查意见】\n{issues or '无'}\n"
                     "要求：说明你实际检查了哪些文件/命令；不要改动任务范围之外的文件。",

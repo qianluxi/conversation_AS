@@ -130,6 +130,72 @@ def test_wait_timeout_marks_message_unknown(store: Store) -> None:
     assert steps[0].state is StepState.FAILED
 
 
+class RecoverAdapter(MockAdapter):
+    async def recover_reply(self, session_id: str, ref: MessageRef) -> AgentReply | None:
+        return AgentReply(
+            session_id=session_id, text="恢复的回复",
+            provider_message_id="recovered-msg", stop_reason="end_turn",
+        )
+
+    async def wait_response(self, ref: MessageRef, *, timeout=None) -> AgentReply:
+        return AgentReply(
+            session_id=ref.session_id, text="继续等待收到的回复",
+            provider_message_id="waited-msg", stop_reason="end_turn",
+        )
+
+
+def test_resume_can_recover_message_from_failed_run(store: Store) -> None:
+    adapter = TimeoutWaitAdapter("worker", MockSettings(role="worker"))
+    conversation = Conversation(store, {"worker": adapter}, goal="失败后恢复")
+
+    async def fail_run() -> None:
+        try:
+            await conversation.ask("worker", "会超时")
+        except AdapterTimeout:
+            pass
+        await conversation.close()
+
+    run(fail_run())
+    store.transition_run(
+        conversation.run_id, status=RunStatus.FAILED, phase=RunPhase.FAILED,
+    )
+    message = store.list_unfinished_messages(conversation.run_id)[0]
+    resumed = Conversation(
+        store, {"worker": RecoverAdapter("worker", MockSettings(role="worker"))},
+        run_id=conversation.run_id,
+    )
+    results = run(resumed.resume())
+    assert results[0]["action"] == "recovered"
+    assert store.get_message(message.message_id).status is MessageStatus.COMPLETED
+    assert store.get_step(store.list_steps(conversation.run_id)[0].step_id).state is StepState.COMPLETED
+
+
+def test_wait_unknown_continues_without_resending(store: Store) -> None:
+    adapter = TimeoutWaitAdapter("worker", MockSettings(role="worker"))
+    conversation = Conversation(store, {"worker": adapter}, goal="继续等待")
+
+    async def fail_run() -> str:
+        try:
+            await conversation.ask("worker", "会超时")
+        except AdapterTimeout:
+            pass
+        await conversation.close()
+        return store.list_unfinished_messages(conversation.run_id)[0].message_id
+
+    message_id = run(fail_run())
+    store.transition_run(
+        conversation.run_id, status=RunStatus.FAILED, phase=RunPhase.FAILED,
+    )
+    waiter = Conversation(
+        store, {"worker": RecoverAdapter("worker", MockSettings(role="worker"))},
+        run_id=conversation.run_id,
+    )
+    waited = run(waiter.wait_unknown(message_id, timeout=1))
+    assert waited.status is MessageStatus.COMPLETED
+    reply = store.find_reply(message_id)
+    assert reply is not None and reply.content == "继续等待收到的回复"
+
+
 def test_unstarted_message_is_not_resent_by_default(store: Store) -> None:
     adapter = MockAdapter("worker", MockSettings(role="worker"))
     conversation = Conversation(store, {"worker": adapter}, goal="recover")

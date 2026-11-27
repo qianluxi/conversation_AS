@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.10.2`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.11.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -135,7 +135,8 @@ python -m agentorchestrator events --run-id <run_id>
 - 连接建立前失败、明确的 4xx → `FAILED`（未送达，可安全重试）；
 - ReadTimeout / WriteTimeout / WriteError / RemoteProtocolError / 5xx →
   `AdapterUncertain` → 消息 `UNKNOWN`（可能已执行，禁止自动重发）；
-- 等待响应超时 → `UNKNOWN`；
+- 等待响应超时 → `UNKNOWN`；**超时只停止本地等待，不自动中止远端任务**；
+- 未确认消息可在 UI/CLI 继续等待同一远端消息、核对恢复或明确请求中止；
 - `dedupe_key` 唯一索引只保证本地幂等，远端恢复依赖 `recover_reply()`。
 
 ```powershell
@@ -144,6 +145,16 @@ python -m agentorchestrator resume  --run-id <id>                    # 只核对
 python -m agentorchestrator resume  --run-id <id> --resend-unstarted # 仅重发 attempt=0
 python -m agentorchestrator release --run-id <id> --message-id <id> --force
 ```
+
+### 3.1 长任务超时分层
+
+- `timeout`：单次 Agent 响应上限，Planner / Worker / Reviewer 分别计时，默认 3600s；
+- `request_timeout`：单次 HTTP 查询/控制请求上限，默认 30s，轮询不会绕过总截止时间；
+- `cancel_timeout`：用户明确请求中止时的短上限，默认 8s；
+- `inactivity_timeout`：可选的无活动检测，默认 0（关闭）；只在没有运行中工具时生效，
+  运行 `npm install` / 构建 / 测试等长命令不会因为暂时无输出被误杀。
+- OpenCode 超时后保留 `provider_message_id` 与会话信息，可继续等待原任务，不重发；
+  UI 提供「继续等待 / 核对恢复 / 中止远端 / 强制释放」。
 
 ### 4. 原子完成，消除回复丢失窗口
 
@@ -363,7 +374,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 100 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 107 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）
@@ -403,12 +414,13 @@ OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选�
   不在文件树指纹范围内。
 - 继续任务会创建新 run，不会原地重开已失败的 terminal run；若要“同 run 续跑”
   需要进一步放宽状态机，当前不做。
-- 生成类任务可能已经写出文件，但仍在跑验证命令；等待超时会标记失败。
-  此时先检查工作目录里的产物，再决定是否强制释放/重试；超时后协调器会尝试中止
-  OpenCode 会话，避免长驻命令继续占用。
-- OpenCode 等待有总超时（默认 600s）和无进展超时（`inactivity_timeout`，默认 300s）。
-  无新文本/工具状态时会提前中止，并在错误中显示最近工具和命令，避免长时间空等；
-  单条长命令可临时调大该值或设为 `0`。执行提示词已禁止截图/浏览器/GUI 等易挂起操作。
+- 生成类任务可能已经写出文件，但仍在跑验证命令；等待超时会标记 UNKNOWN，但不会
+  自动中止远端任务。先检查工作目录和时间戳，再用「继续等待」或「核对恢复」；只有
+  用户明确选择「中止远端」时才调用远端 abort。
+- OpenCode 等待分为总超时（默认 3600s）、HTTP 请求上限（默认 30s）、可选中止上限
+  （默认 8s）和可选无活动检测（默认关闭）。有运行中工具时不会触发无活动检测；长
+  命令可正常执行。执行提示词允许合理的安装/构建/测试命令，只禁止截图、浏览器/GUI
+  等易挂起操作，并要求保存日志、检查退出码。
 
 ## 后续（阶段三）
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any
 
 import httpx
@@ -155,8 +157,8 @@ def test_list_models_never_leaks_provider_keys() -> None:
     assert data["models"][0]["model_name"] == "Model One"
     assert data["models"][1]["configured"] is False
 
-def test_wait_timeout_aborts_remote_session() -> None:
-    state: dict[str, Any] = {"messages": [], "aborted": False}
+def test_wait_timeout_keeps_remote_and_can_continue() -> None:
+    state: dict[str, Any] = {"messages": [], "aborted": False, "completed": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -170,10 +172,14 @@ def test_wait_timeout_aborts_remote_session() -> None:
                  "parts": [{"type": "text", "text": "hi"}]},
                 {"info": {"id": "msg_a", "sessionID": "ses_to", "role": "assistant",
                           "parentID": body["messageID"], "time": {"created": 2000}},
-                 "parts": [{"type": "tool", "tool": "bash", "state": {"status": "running"}}]},
+                 "parts": [{"type": "text", "text": "still working"}]},
             ]
             return httpx.Response(204)
         if path == "/session/ses_to/message":
+            if state["completed"]:
+                info = state["messages"][1]["info"]
+                info["time"]["completed"] = 3000
+                state["messages"][1]["parts"] = [{"type": "text", "text": "done"}]
             return httpx.Response(200, json=state["messages"])
         if path == "/session/ses_to/abort":
             state["aborted"] = True
@@ -188,9 +194,16 @@ def test_wait_timeout_aborts_remote_session() -> None:
             ref = await adapter.send_message(session_id, "hi")
             with pytest.raises(AdapterTimeout):
                 await adapter.wait_response(ref, timeout=0.15)
+            assert state["aborted"] is False
+            assert ref.message_id in adapter._pending
+            state["completed"] = True
+            adapter._pending.clear()  # 模拟进程重启后从 MessageRef 重建
+            reply = await adapter.wait_response(ref, timeout=2)
+            assert reply.text == "done"
 
     run(scenario())
-    assert state["aborted"] is True
+    assert state["aborted"] is False
+
 
 def test_inactivity_timeout_reports_current_tool() -> None:
     state: dict[str, Any] = {"messages": [], "aborted": False}
@@ -228,9 +241,106 @@ def test_inactivity_timeout_reports_current_tool() -> None:
             session_id = await adapter.create_session("run-idle")
             ref = await adapter.send_message(session_id, "hi")
             with pytest.raises(AdapterTimeout) as excinfo:
-                await adapter.wait_response(ref, timeout=5)
-            assert "没有新进展" in str(excinfo.value)
+                await adapter.wait_response(ref, timeout=0.35)
+            assert "达到上限" in str(excinfo.value)
             assert "npm install" in str(excinfo.value)
 
     run(scenario())
-    assert state["aborted"] is True
+    assert state["aborted"] is False
+
+
+def test_inactivity_timeout_only_without_active_tool() -> None:
+    state: dict[str, Any] = {"messages": [], "aborted": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/session":
+            return httpx.Response(200, json={"id": "ses_idle"})
+        if path == "/session/ses_idle/prompt_async":
+            body = json.loads(request.content)
+            state["messages"] = [
+                {"info": {"id": body["messageID"], "sessionID": "ses_idle", "role": "user",
+                          "time": {"created": 1000}},
+                 "parts": [{"type": "text", "text": "hi"}]},
+                {"info": {"id": "msg_a", "sessionID": "ses_idle", "role": "assistant",
+                          "parentID": body["messageID"], "time": {"created": 2000}},
+                 "parts": [{"type": "reasoning", "text": "thinking"}]},
+            ]
+            return httpx.Response(204)
+        if path == "/session/ses_idle/message":
+            return httpx.Response(200, json=state["messages"])
+        if path == "/session/ses_idle/abort":
+            state["aborted"] = True
+            return httpx.Response(200, json=True)
+        return httpx.Response(404, json={"error": path})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter(
+                "oc", _settings(inactivity_timeout=0.08, timeout=5), client=client
+            )
+            session_id = await adapter.create_session("run-idle")
+            ref = await adapter.send_message(session_id, "hi")
+            with pytest.raises(AdapterTimeout) as excinfo:
+                await adapter.wait_response(ref, timeout=5)
+            assert "没有新活动" in str(excinfo.value)
+
+    run(scenario())
+    assert state["aborted"] is False
+
+
+def test_poll_request_is_bounded_by_request_timeout() -> None:
+    state: dict[str, Any] = {"messages": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/session":
+            return httpx.Response(200, json={"id": "ses_slow"})
+        if path == "/session/ses_slow/prompt_async":
+            return httpx.Response(204)
+        if path == "/session/ses_slow/message":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, json={"error": path})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter(
+                "oc", _settings(request_timeout=0.05, timeout=5), client=client
+            )
+            session_id = await adapter.create_session("run-slow")
+            ref = await adapter.send_message(session_id, "hi")
+            seen: list[float] = []
+
+            async def fake_messages(session_id: str, *, timeout: float | None = None):
+                seen.append(float(timeout or 0))
+                return []
+
+            adapter._legacy_messages = fake_messages  # type: ignore[method-assign]
+            started = time.monotonic()
+            with pytest.raises(AdapterTimeout):
+                await adapter.wait_response(ref, timeout=0.12)
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.5
+            assert seen and max(seen) <= 0.06
+
+    run(scenario())
+
+
+def test_cancel_request_uses_cancel_timeout() -> None:
+    async def scenario() -> None:
+        adapter = OpenCodeAdapter("oc", _settings(cancel_timeout=0.05))
+        seen: list[float] = []
+
+        async def fake_request(method: str, path: str, *, timeout: float | None = None, **kwargs: Any):
+            seen.append(float(timeout or 0))
+            raise AdapterTimeout("cancel timed out")
+
+        adapter._request = fake_request  # type: ignore[method-assign]
+        with pytest.raises(AdapterTimeout):
+            await adapter.cancel("ses_abort")
+        assert seen == [0.05]
+        await adapter.aclose()
+
+    run(scenario())

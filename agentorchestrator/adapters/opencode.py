@@ -53,13 +53,17 @@ class OpenCodeAdapter(AgentAdapter):
         self.settings = settings
         self._base = settings.base_url.rstrip("/")
         self._timeout = settings.timeout
+        self._request_timeout = settings.request_timeout
+        self._cancel_timeout = settings.cancel_timeout
         self._inactivity_timeout = settings.inactivity_timeout
         self._client = client
         self._owns_client = client is None
         if self._client is None:
             auth = httpx.BasicAuth(settings.username, settings.password) if settings.password else None
-            self._client = httpx.AsyncClient(auth=auth, verify=settings.verify_ssl,
-                                             timeout=httpx.Timeout(settings.timeout, connect=10.0))
+            self._client = httpx.AsyncClient(
+                auth=auth, verify=settings.verify_ssl,
+                timeout=httpx.Timeout(settings.request_timeout, connect=10.0),
+            )
         self._pending: dict[str, _Pending] = {}
         self._replies: dict[str, AgentReply] = {}
 
@@ -70,7 +74,9 @@ class OpenCodeAdapter(AgentAdapter):
 
     async def _request(self, method: str, path: str, *, timeout: float | None = None,
                        **kwargs: Any) -> httpx.Response:
-        limit = httpx.Timeout(timeout if timeout is not None else self._timeout, connect=10.0)
+        limit = httpx.Timeout(
+            timeout if timeout is not None else self._request_timeout, connect=10.0,
+        )
         try:
             response = await self._client.request(
                 method, f"{self._base}{path}", timeout=limit, **kwargs
@@ -226,13 +232,17 @@ class OpenCodeAdapter(AgentAdapter):
             session_id=session_id, message_id=user_message_id,
             baseline_assistant_ids=baseline, sent_at=time.time(), api_style="legacy",
         )
-        return MessageRef(session_id=session_id, message_id=user_message_id)
+        return MessageRef(
+            session_id=session_id, message_id=user_message_id,
+            metadata={"api_style": "legacy", "sent_at": time.time()},
+        )
 
     async def _send_legacy_sync(self, session_id: str, text: str,
                                 timeout: float | None) -> MessageRef:
         response = await self._request(
             "POST", f"/session/{session_id}/message", params=self._params(),
-            json=self._legacy_payload(text), timeout=timeout,
+            json=self._legacy_payload(text),
+            timeout=timeout if timeout is not None else self._timeout,
         )
         payload = response.json()
         info = payload.get("info") or {}
@@ -264,16 +274,29 @@ class OpenCodeAdapter(AgentAdapter):
         )
         return MessageRef(
             session_id=session_id, message_id=message_id,
-            metadata={"api_style": "v2", "baseline_assistant_ids": sorted(baseline)},
+            metadata={
+                "api_style": "v2",
+                "baseline_assistant_ids": sorted(baseline),
+                "sent_at": time.time(),
+            },
+        )
+
+    def _pending_from_ref(self, ref: MessageRef) -> _Pending:
+        metadata = ref.metadata or {}
+        style = metadata.get("api_style") or self.settings.api_style
+        baseline = set(metadata.get("baseline_assistant_ids") or [])
+        sent_at = float(metadata.get("sent_at") or time.time())
+        return _Pending(
+            session_id=ref.session_id, message_id=ref.message_id,
+            baseline_assistant_ids=baseline, sent_at=sent_at, api_style=style,
         )
 
     async def wait_response(self, ref: MessageRef, *, timeout: float | None = None) -> AgentReply:
         cached = self._replies.pop(ref.message_id, None)
         if cached is not None:
             return cached
-        pending = self._pending.get(ref.message_id)
-        if pending is None:
-            raise AdapterError(f"未知的消息引用：{ref.message_id}")
+        pending = self._pending.get(ref.message_id) or self._pending_from_ref(ref)
+        self._pending.setdefault(ref.message_id, pending)
 
         limit = timeout if timeout is not None else self._timeout
         loop = asyncio.get_running_loop()
@@ -283,7 +306,7 @@ class OpenCodeAdapter(AgentAdapter):
         last_progress = None
         last_change = loop.time()
         while True:
-            reply, partial = await self._poll(pending, deadline)
+            reply, partial, running_tools = await self._poll(pending, deadline)
             if reply is not None:
                 self._pending.pop(ref.message_id, None)
                 return reply
@@ -291,38 +314,38 @@ class OpenCodeAdapter(AgentAdapter):
             if partial != last_progress:
                 last_progress = partial
                 last_change = now
-            if inactivity > 0 and now - last_change >= inactivity:
-                self._pending.pop(ref.message_id, None)
-                try:
-                    await self.cancel(pending.session_id)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("无进展超时后中止 OpenCode 会话失败：%s", exc)
+            if running_tools > 0:
+                # 活动工具可能长时间没有输出（install/build/test），不能按空闲处理。
+                last_change = now
+            if inactivity > 0 and running_tools == 0 and now - last_change >= inactivity:
                 raise AdapterTimeout(
-                    f"OpenCode 超过 {inactivity:.0f}s 没有新进展，已中止。最近进展：{partial[-800:]}"
+                    f"OpenCode 超过 {inactivity:.0f}s 没有新活动；已停止本地等待，"
+                    f"远端可能仍在执行。可使用“继续等待”、核对远端或请求中止。"
+                    f"最近进展：{partial[-800:]}"
                 )
             remaining = deadline - now
             if remaining <= 0:
-                # 超时后尽量中止远端，避免挂起的工具/长驻命令一直占着会话
-                self._pending.pop(ref.message_id, None)
-                try:
-                    await self.cancel(pending.session_id)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("超时后中止 OpenCode 会话失败：%s", exc)
                 raise AdapterTimeout(
-                    f"等待 OpenCode 响应超时（{limit}s）。最近进展：{partial[-800:]}"
+                    f"等待 OpenCode 响应达到上限（{limit}s）；已停止本地等待，"
+                    f"远端可能仍在执行。可使用“继续等待”、核对远端或请求中止。"
+                    f"最近进展：{partial[-800:]}"
                 )
             await asyncio.sleep(min(self.settings.poll_interval, remaining))
 
-    async def _poll(self, pending: _Pending, deadline: float) -> tuple[AgentReply | None, str]:
+    async def _poll(
+        self, pending: _Pending, deadline: float,
+    ) -> tuple[AgentReply | None, str, int]:
         if pending.api_style == "legacy":
-            return await self._poll_legacy(pending)
+            return await self._poll_legacy(pending, deadline)
         return await self._poll_v2(pending, deadline)
 
     # ---- legacy polling ---------------------------------------------------
 
-    async def _legacy_messages(self, session_id: str) -> list[dict[str, Any]]:
+    async def _legacy_messages(
+        self, session_id: str, *, timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
         response = await self._request(
-            "GET", f"/session/{session_id}/message", params=self._params()
+            "GET", f"/session/{session_id}/message", params=self._params(), timeout=timeout,
         )
         return response.json()
 
@@ -333,8 +356,13 @@ class OpenCodeAdapter(AgentAdapter):
             if (item.get("info") or {}).get("role") == "assistant"
         }
 
-    async def _poll_legacy(self, pending: _Pending) -> tuple[AgentReply | None, str]:
-        items = await self._legacy_messages(pending.session_id)
+    async def _poll_legacy(
+        self, pending: _Pending, deadline: float,
+    ) -> tuple[AgentReply | None, str, int]:
+        loop = asyncio.get_running_loop()
+        remaining = max(0.1, deadline - loop.time())
+        request_limit = min(self._request_timeout, remaining)
+        items = await self._legacy_messages(pending.session_id, timeout=request_limit)
         chosen: dict[str, Any] | None = None
         chosen_score = -1
         chosen_created = -1.0
@@ -356,15 +384,16 @@ class OpenCodeAdapter(AgentAdapter):
                 chosen, chosen_score, chosen_created = item, score, created
 
         if chosen is None:
-            return None, "等待 OpenCode 开始响应…"
+            return None, "等待 OpenCode 开始响应…", 0
         info = chosen.get("info") or {}
         text = self._extract_legacy_parts(chosen.get("parts") or [])
         progress = self._legacy_progress(chosen.get("parts") or [], text)
+        running = self._running_tool_count(chosen.get("parts") or [])
         if info.get("error"):
             raise AdapterRemoteError(f"OpenCode 返回错误：{info['error']}")
         completed = bool((info.get("time") or {}).get("completed"))
         if not completed:
-            return None, progress
+            return None, progress, running
         reply = AgentReply(
             session_id=pending.session_id,
             text=text,
@@ -375,7 +404,7 @@ class OpenCodeAdapter(AgentAdapter):
                 key: info.get(key) for key in ("providerID", "modelID", "cost", "tokens", "finish")
             }},
         )
-        return reply, text
+        return reply, text, running
 
     @staticmethod
     def _extract_legacy_parts(parts: list[dict[str, Any]]) -> str:
@@ -385,6 +414,17 @@ class OpenCodeAdapter(AgentAdapter):
             if part.get("type") == "text" and not part.get("synthetic") and not part.get("ignored")
         ]
         return "\n".join(text for text in texts if text).strip()
+
+    @staticmethod
+    def _running_tool_count(parts: list[dict[str, Any]]) -> int:
+        count = 0
+        for part in parts:
+            if part.get("type") != "tool":
+                continue
+            status = str((part.get("state") or {}).get("status") or "").lower()
+            if status in {"running", "pending", "in_progress", "started"}:
+                count += 1
+        return count
 
     @staticmethod
     def _legacy_progress(parts: list[dict[str, Any]], text: str) -> str:
@@ -422,10 +462,10 @@ class OpenCodeAdapter(AgentAdapter):
     # ---- v2 polling -------------------------------------------------------
 
     async def _v2_messages(self, session_id: str, *, order: str = "desc",
-                           limit: int = 50) -> list[dict[str, Any]]:
+                           limit: int = 50, timeout: float | None = None) -> list[dict[str, Any]]:
         response = await self._request(
             "GET", f"/api/session/{session_id}/message",
-            params={"order": order, "limit": limit},
+            params={"order": order, "limit": limit}, timeout=timeout,
         )
         return response.json().get("data") or []
 
@@ -433,27 +473,36 @@ class OpenCodeAdapter(AgentAdapter):
         items = await self._v2_messages(session_id, order="asc", limit=200)
         return {item["id"] for item in items if item.get("type") == "assistant"}
 
-    async def _poll_v2(self, pending: _Pending, deadline: float) -> tuple[AgentReply | None, str]:
+    async def _poll_v2(
+        self, pending: _Pending, deadline: float,
+    ) -> tuple[AgentReply | None, str, int]:
         loop = asyncio.get_running_loop()
-        remaining = max(0.0, deadline - loop.time())
-        try:
-            await self._request(
-                "POST", f"/api/session/{pending.session_id}/wait",
-                timeout=min(20.0, remaining) or 1.0,
-            )
-        except AdapterTimeout:
-            pass
-        except AdapterRemoteError as exc:
-            if exc.status_code not in (404, 405):
-                raise
+        remaining = max(0.1, deadline - loop.time())
+        request_limit = min(self._request_timeout, remaining)
+        wait_paths = (
+            f"/api/experimental/session/{pending.session_id}/wait",
+            f"/api/session/{pending.session_id}/wait",
+        )
+        for path in wait_paths:
+            try:
+                await self._request("POST", path, timeout=min(request_limit, 20.0))
+                break
+            except AdapterTimeout:
+                break
+            except AdapterRemoteError as exc:
+                if exc.status_code not in (404, 405):
+                    raise
 
-        items = await self._v2_messages(pending.session_id)
+        remaining = max(0.1, deadline - loop.time())
+        items = await self._v2_messages(
+            pending.session_id, timeout=min(self._request_timeout, remaining),
+        )
         candidates = [
             item for item in items
             if item.get("type") == "assistant" and item.get("id") not in pending.baseline_assistant_ids
         ]
         if not candidates:
-            return None, "等待 OpenCode 开始响应…"
+            return None, "等待 OpenCode 开始响应…", 0
         chosen = max(candidates, key=lambda item: float((item.get("time") or {}).get("created") or 0))
         content = chosen.get("content") or []
         text = "\n".join(
@@ -462,11 +511,12 @@ class OpenCodeAdapter(AgentAdapter):
             if part.get("type") == "text"
         ).strip()
         progress = self._legacy_progress(content, text)
+        running = self._running_tool_count(content)
         if chosen.get("error"):
             raise AdapterRemoteError(f"OpenCode 返回错误：{chosen['error']}")
         finished = bool((chosen.get("time") or {}).get("completed")) or bool(chosen.get("finish"))
         if not finished:
-            return None, progress
+            return None, progress, running
         reply = AgentReply(
             session_id=pending.session_id,
             text=text,
@@ -477,7 +527,7 @@ class OpenCodeAdapter(AgentAdapter):
                 key: chosen.get(key) for key in ("agent", "model", "finish", "cost", "tokens")
             }},
         )
-        return reply, text
+        return reply, text, running
 
     # ---- control ----------------------------------------------------------
 
@@ -526,11 +576,14 @@ class OpenCodeAdapter(AgentAdapter):
             )
         return None
 
-    async def cancel(self, session_id: str) -> None:
+    async def cancel(self, session_id: str, *, timeout: float | None = None) -> None:
         path = (f"/api/session/{session_id}/interrupt"
                 if self.settings.api_style == "v2"
                 else f"/session/{session_id}/abort")
-        await self._request("POST", path, params=self._params())
+        await self._request(
+            "POST", path, params=self._params(),
+            timeout=timeout if timeout is not None else self._cancel_timeout,
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:

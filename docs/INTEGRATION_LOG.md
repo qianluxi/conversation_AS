@@ -13,7 +13,7 @@
 | OpenCode | 1.19.0 |
 | WorkBuddy Desktop | 2.165.0 |
 | 模型 | `opencode-go/deepseek-v4.1-flash` |
-| 协调器 | conversation_AS 0.6.x ~ 0.10.2 |
+| 协调器 | conversation_AS 0.6.x ~ 0.11.0 |
 
 ## OpenCode
 
@@ -30,7 +30,8 @@
 - 真实生成任务：OpenCode `build` 生成 `index.html`（Three.js，26 KB），
   `node --check` 通过；
 - 超时场景：Worker 在写出文件后卡在验证命令，协调器 300s 超时并中止会话；
-  随后将默认超时提高到 600s，并在超时后自动 abort。
+  随后将默认超时提高到 600s。（0.11.0 起改为超时只停止本地等待、不自动 abort，
+  默认单次响应 3600s；HTTP 轮询/取消有独立上限。）
 
 未验证/不可用：
 
@@ -67,6 +68,9 @@
 - ACP 不确定提交进入 QUARANTINED，保持会话锁，禁止后续 prompt 覆盖流式消息归属。
 - OpenCode 等待增加无进展超时，错误中显示最近工具/命令；执行提示词禁止截图、
   浏览器/GUI 等易挂起操作。
+- 0.11.0：拆分 Agent 响应超时与 HTTP 请求/取消超时；超时不再自动中止远端，
+  UNKNOWN 消息可继续等待原任务、核对恢复或明确中止；无活动检测只在没有运行中工具时
+  生效且默认关闭；WorkBuddy ACP 记录 chunk/工具活动并采用同样的超时语义。
 
 ### 官方 OAuth 本地助理 / 云端 ACP
 

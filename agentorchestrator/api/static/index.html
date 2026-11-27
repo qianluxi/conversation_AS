@@ -166,10 +166,11 @@
       </div>
       <div class="row-2">
         <div><label>最大轮数</label><input id="maxRounds" type="number" value="2" min="1" max="10"></div>
-        <div><label>超时（秒）</label><input id="timeout" type="number" value="600" min="30"></div>
+        <div><label>单次 Agent 响应超时（秒）</label><input id="timeout" type="number" value="3600" min="30" max="7200"></div>
         <button id="healthBtn" class="secondary">检查连接</button>
         <button id="startBtn" class="primary">开始协作</button>
       </div>
+      <div class="muted" style="margin-bottom:8px">超时按 Planner / Worker / Reviewer 每次响应分别计时；长任务建议 3600–7200 秒。</div>
       <div id="agentStatus" class="agent-grid"></div>
       <div id="startError" class="error"></div>
     </section>
@@ -344,7 +345,7 @@ async function startRun() {
       opencode_directory: $("opencodeDirectory").value.trim() || null,
       opencode_agent: $("opencodeAgent").value || null,
       max_rounds: Number($("maxRounds").value) || 2,
-      timeout: Number($("timeout").value) || 300,
+      timeout: Number($("timeout").value) || 3600,
     };
     const result = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
     currentRun = result.run_id;
@@ -632,8 +633,11 @@ async function loadPending() {
         <div><strong>${esc(message.to_agent)}</strong> ${badge(message.status)}
           <span class="muted">${esc(message.run_id)}</span></div>
         <div class="preview">${esc((message.content || "").slice(0, 180))}</div>
+        ${message.error ? `<div class="preview" style="color:var(--danger)">${esc(message.error.slice(0, 240))}</div>` : ""}
         <div class="actions">
+          ${message.provider === "opencode" ? `<button onclick="waitMessage('${esc(message.run_id)}','${esc(message.message_id)}')">继续等待</button>` : ""}
           <button onclick="resumeRun('${esc(message.run_id)}')">核对恢复</button>
+          <button onclick="abortRun('${esc(message.run_id)}')">中止远端</button>
           <button class="danger" onclick="releaseMessage('${esc(message.run_id)}','${esc(message.message_id)}')">强制释放</button>
         </div>
       </div>`).join("");
@@ -648,6 +652,29 @@ async function resumeRun(runId) {
     const summary = (result.results || []).map(item => `${item.action}: ${item.message_id}`).join("\n");
     alert(summary || "没有未完成消息。");
     loadPending();
+    if (currentRun === runId) selectRun(runId);
+  } catch (error) { alert(error.message); }
+}
+
+async function waitMessage(runId, messageId) {
+  const seconds = Number(prompt("继续等待多少秒？", "600"));
+  if (!seconds || seconds <= 0) return;
+  try {
+    const result = await api(`/api/runs/${runId}/wait`, {
+      method: "POST",
+      body: JSON.stringify({ message_id: messageId, timeout: Math.min(seconds, 7200) }),
+    });
+    alert(`已收到回复：${(result.message?.content || "").slice(0, 300)}`);
+    loadPending();
+    if (currentRun === runId) selectRun(runId);
+  } catch (error) { alert(error.message); }
+}
+
+async function abortRun(runId) {
+  if (!confirm("请求远端停止执行？本地消息仍会保留为未知，确认远端结束后可再强制释放。")) return;
+  try {
+    await api(`/api/runs/${runId}/abort`, { method: "POST", body: "{}" });
+    alert("已向远端发送中止请求。");
     if (currentRun === runId) selectRun(runId);
   } catch (error) { alert(error.message); }
 }

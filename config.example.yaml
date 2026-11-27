@@ -10,7 +10,7 @@ agents:
     client_kind: skill
     model: auto
     chat_path: /v2/chat/completions
-    timeout: 300
+    timeout: 3600
     history_limit: 20
     # 一般可自动发现；如提示找不到，手动指向：
     # library_path: D:/Program Files/WorkBuddy/resources/app.asar.unpacked/resources/plugins/workbuddy-builtin/skills/library
@@ -24,7 +24,7 @@ agents:
   #   redirect_uri: ${WORKBUDDY_REDIRECT_URI}
   #   scope: "user.localassistant.readable user.localassistant.invokable"
   #   token_file: data/workbuddy_token.json
-  #   timeout: 300
+  #   timeout: 3600
   #   poll_interval: 2
   #   lock_file: data/workbuddy_local.lock
 
@@ -39,7 +39,8 @@ agents:
   #   token_file: data/workbuddy_token.json
   #   bootstrap_prompt: "初始化协作会话，请等待后续指令。"
   #   cwd: /workspace
-  #   timeout: 600
+  #   timeout: 3600
+  #   inactivity_timeout: 0   # 无活动检测，0 关闭；有 chunk/工具事件会刷新
   #   poll_interval: 2
   #   auto_approve: false   # true 仅自动允许 allow_once；ask 在 Web UI 中人工确认，超时拒绝
   #   # 工具授权策略：token 级匹配 operation（不是任意子串），复合操作取最严格
@@ -65,10 +66,14 @@ agents:
     # agent: build   # build 可修改代码；plan 只读检查（界面可按次覆盖）
     # provider_id: opencode-go
     # model_id: deepseek-v4.1-flash
-    timeout: 600
-    # 无进展超时：连续 N 秒没有新的文本/工具状态变化就中止，0 表示关闭。
-    # 用于尽快发现挂起的命令；真正长时间单条命令可临时调大或设为 0。
-    inactivity_timeout: 300
+    timeout: 3600
+    # 单次 HTTP 查询/控制请求上限；与 Agent 响应上限分离，避免轮询请求卡住看门狗。
+    request_timeout: 30
+    # 用户明确请求中止时的 HTTP 上限。
+    cancel_timeout: 8
+    # 无活动超时：0 表示关闭。仅在没有任何运行中工具时生效；
+    # 运行 npm install/build/test 等长命令不会因暂时无输出被中止。
+    inactivity_timeout: 0
     poll_interval: 1
 
   # 离线演示/测试用，不访问网络
