@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentorchestrator"
-version = "0.8.0"
+version = "0.9.0"
 description = "Reliable multi-agent orchestrator for local AI development (WorkBuddy / OpenCode / ACP)"
 readme = "README.md"
 license = { file = "LICENSE" }

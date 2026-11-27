@@ -13,7 +13,7 @@
 | OpenCode | 1.19.0 |
 | WorkBuddy Desktop | 2.165.0 |
 | 模型 | `opencode-go/deepseek-v4.1-flash` |
-| 协调器 | conversation_AS 0.6.x ~ 0.8.0 |
+| 协调器 | conversation_AS 0.6.x ~ 0.9.0 |
 
 ## OpenCode
 
@@ -56,6 +56,14 @@
 - 只有 chat 能力，没有桌面端工具/文件权限；
 - 无历史轮次关联，重启后不能恢复 IPC 轮次；
 - 不纳入与 OpenCode 同等级的故障恢复保证。
+
+## 权限交互与取消（0.9.0）
+
+- `ask` 权限通过 Web UI 的 `/api/permissions` 挂起确认，120 秒超时拒绝；
+- `auto_approve` 只选择 `allow_once`；
+- 取消运行会尝试 OpenCode abort / ACP session/cancel，并把 run 标记 `cancelled`；
+- 只读验证增加文件树指纹，覆盖 git 忽略文件；非 git 工作区返回
+  `verification_unavailable` 并停止只读运行。
 
 ### 官方 OAuth 本地助理 / 云端 ACP
 

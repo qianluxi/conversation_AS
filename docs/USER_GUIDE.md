@@ -231,7 +231,6 @@ python -m agentorchestrator --config config.yaml send --agent workbuddy --text "
 - 超时后**不会**自动允许下一条消息，必须核对远端或人工释放（见第 8 节）。
 
 ### 5.4 云端任务 ACP（`workbuddy_acp`）
-
 适合长任务、流式输出。在 `config.yaml` 启用：
 
 ```yaml
@@ -258,6 +257,14 @@ agents:
 ```powershell
 python -m agentorchestrator --config config.yaml send --agent workbuddy_acp --text "分析这个项目的风险"
 ```
+
+权限确认：
+
+- `allow` 自动同意（优先 `allow_once`）；
+- `deny` 直接拒绝；
+- `ask` 在 Web UI 的运行详情弹出「需要工具授权」，默认 120 秒超时后拒绝；
+- CLI/无人值守没有交互通道，`ask` 按拒绝处理；
+- `auto_approve: true` 只自动选择 `allow_once`，不会自动选择永久授权。
 
 限制：
 
@@ -299,6 +306,8 @@ python -m agentorchestrator --config config.yaml ui
   执行角色默认 `plan`（只读）；需要改代码时切到 `build`；
 - 实时查看运行状态、步骤耗时、消息全文、状态机事件和结构化审查结果；
 - **执行结果 / 最终交付物**显示在运行详情顶部，可一键复制；审查卡只显示判定；
+- ACP 工具授权会弹出确认（允许一次/允许/拒绝，超时拒绝）；
+- 运行中可以「取消运行」，会尝试中止远端 Agent 并把 run 标记为 `cancelled`；
 - 在「待处理 / 隔离消息」中执行核对恢复或强制释放；
 - 从历史运行列表点击回看。
 
@@ -457,7 +466,18 @@ python -m agentorchestrator --config config.yaml release --run-id <id> --message
 - 需终止远端：调用 `release --force`（内部会尝试 `session/cancel`）；
 - 不要同时用两个进程驱动同一个 ACP 会话。
 
-### 8.5 非法状态迁移
+### 8.6 取消运行
+
+Web UI 运行详情中的「取消运行」会：
+
+1. 尽量向 Agent 下发中止（OpenCode abort / ACP session/cancel）；
+2. 取消本地协程，把当前消息标记 `cancelled`；
+3. 把 run 状态写为 `cancelled`，workflow 检查点标记 `cancelled`；
+4. 清理该 run 的待授权请求。
+
+取消不等于回滚：Agent 可能已经产生文件，请检查工作目录。
+
+### 8.7 非法状态迁移
 
 `InvalidTransition` 说明试图从终态继续或跳过中间状态。终态（completed/failed/
 cancelled）不可恢复；需要新任务请新建 run。
@@ -481,7 +501,8 @@ cancelled）不可恢复；需要新任务请新建 run。
 
 - 复合操作取最严格：`read + write` → ask；`read + delete` → deny；
 - `deny` 永远优先于 `auto_approve`；
-- 未识别工具默认 ask，且没有 handler/auto_approve 时拒绝。
+- `ask` 在 Web UI 中等待人工确认；CLI/无人值守默认拒绝；
+- `auto_approve` 只允许 `allow_once`，不会自动选择 `allow_always`。
 
 可通过 `permissions.allow/ask/deny` 覆盖，支持 operation 名或同义词
 （`read/list/grep`、`write/edit`、`bash/shell` 等）。
@@ -544,8 +565,9 @@ asyncio.run(main())
 - 本地助理已用 `lock_file` 做跨进程互斥；跨进程任务队列仍未实现。
 - `resume` 只核对/补齐消息；要按节点继续工作流，请用界面的「继续此任务」。
 - ACP 重启后无法唯一关联历史轮次，会保留 `unknown`。
-- OpenCode 的工具权限由 OpenCode 自行控制；只读任务通过 `plan` + git 快照做
-  事后保护，不是系统级沙箱。
+- OpenCode 的工具权限由 OpenCode 自行控制；只读任务通过 `plan` + git/文件树
+  快照做双重保护。非 git 工作区会以 `verification_unavailable` 失败，不会假装
+  只读验证通过。
 - 远端 `create_session` 在结果不确定时不会写入消息记录，需要人工确认会话是否创建。
 - Reviewer 已有独立 git 证据，但协调器尚未自动执行测试/CI；完整质量门禁仍是后续工作。
 

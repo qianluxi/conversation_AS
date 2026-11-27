@@ -31,6 +31,12 @@ def test_ui_page_and_mock_run(tmp_path: Path) -> None:
             assert page.status_code == 200
             assert "WorkBuddy" in page.text
             assert "开始协作" in page.text
+            assert "取消运行" in page.text
+            assert "需要工具授权" in page.text
+            assert client.get("/api/permissions").json() == []
+            assert client.post(
+                "/api/permissions/not-found", json={"decision": "deny"}
+            ).status_code == 404
 
             agents = client.get("/api/agents").json()
             assert {item["name"] for item in agents} == {"planner", "worker"}
@@ -68,6 +74,7 @@ def test_ui_page_and_mock_run(tmp_path: Path) -> None:
             assert runs and runs[0]["run_id"] == run_id
             assert client.get("/api/pending").json() == []
             assert client.get("/api/runs/does-not-exist").status_code == 404
+            assert client.post(f"/api/runs/{run_id}/cancel", json={}).status_code == 409
     finally:
         store.close()
 

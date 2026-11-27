@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ..adapters.base import (
@@ -146,7 +147,7 @@ class Conversation:
                                            finished_at=None)
                     self.event("message_retry", step_id=step.step_id,
                                payload={"message_id": existing.message_id})
-                    return await self._dispatch(existing, binding, adapter, step, timeout)
+                    return await self._dispatch_guarded(existing, binding, adapter, step, timeout)
                 if reply is None:
                     raise RuntimeError(
                         f"幂等键 {dedupe_key} 命中的消息状态为 {existing.status.value}，"
@@ -197,7 +198,25 @@ class Conversation:
         self.event("step_started", step_id=step.step_id, payload={
             "agent": agent, "turn_id": turn, "role": role,
         })
-        return await self._dispatch(outgoing, binding, adapter, step, timeout)
+        return await self._dispatch_guarded(outgoing, binding, adapter, step, timeout)
+
+    async def _dispatch_guarded(self, outgoing: Message, binding: SessionBinding,
+                                adapter: AgentAdapter, step: Step | None,
+                                timeout: float | None) -> AgentReply:
+        try:
+            return await self._dispatch(outgoing, binding, adapter, step, timeout)
+        except asyncio.CancelledError:
+            self.store.update_message(
+                outgoing.message_id, status=MessageStatus.CANCELLED, error="cancelled",
+            )
+            if step is not None:
+                self.store.finish_step(step.step_id, StepState.FAILED, error="cancelled")
+                self.event("step_failed", step_id=step.step_id,
+                           payload={"message_id": outgoing.message_id,
+                                    "error_type": "cancelled"})
+            self.event("message_cancelled", step_id=step.step_id if step else None,
+                       payload={"message_id": outgoing.message_id})
+            raise
 
     async def _dispatch(self, outgoing: Message, binding: SessionBinding,
                         adapter: AgentAdapter, step: Step | None,
@@ -484,6 +503,20 @@ class Conversation:
                 self.event("step_reconciled", step_id=step.step_id,
                            payload={"state": "failed"})
 
+    async def cancel_inflight(self) -> None:
+        """尽力中止该 run 在各 Agent 上的当前执行（不改变本地 run 状态）。"""
+        for agent, adapter in self.adapters.items():
+            binding = self.store.get_binding(self.run_id, agent)
+            if binding is None:
+                continue
+            try:
+                await adapter.remote_abort(binding.provider_session_id)
+            except AdapterError:
+                try:
+                    await adapter.cancel_wait(binding.provider_session_id)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def close(self) -> None:
         seen: set[int] = set()
         for adapter in self.adapters.values():
@@ -666,24 +699,32 @@ async def run_collaboration(conversation: Conversation, *,
                     },
                 )
                 conversation.save_workflow(workflow, event_type="workflow_work_saved")
-                if read_only and changed is True:
+                if read_only and changed is not False:
+                    reason = ("read_only_violation" if changed is True
+                              else "verification_unavailable")
                     workflow["stage"] = "failed"
-                    workflow["error"] = "read_only_violation"
+                    workflow["error"] = reason
                     conversation.save_workflow(
-                        workflow, event_type="workflow_read_only_violation",
+                        workflow, event_type=f"workflow_{reason}",
                     )
                     conversation.finish(
                         RunStatus.FAILED, RunPhase.FAILED,
                         {**metadata, "approved": False, "rounds": round_no,
-                         "reason": "read_only_violation",
+                         "reason": reason,
                          "verification": workflow.get("verification")},
+                    )
+                    message = (
+                        "只读任务检测到工作区发生变化，已停止；请检查 git diff。"
+                        if changed is True else
+                        "只读任务无法获得完整工作区快照（非 git 仓库或 git 不可用），"
+                        "已按 verification_unavailable 停止。"
                     )
                     return {
                         "run_id": conversation.run_id, "approved": False,
                         "rounds": round_no, "plan": plan, "work": work_text,
                         "review": "",
                         "review_result": None,
-                        "error": "只读任务检测到工作区发生变化，已停止；请检查 git diff。",
+                        "error": message,
                     }
                 stage = "review"
 
@@ -774,6 +815,22 @@ async def run_collaboration(conversation: Conversation, *,
                 RunPhase.REVISION_REQUIRED, event_type="revision_required",
                 payload={"round": round_no - 1},
             )
+    except asyncio.CancelledError:
+        workflow["stage"] = "cancelled"
+        workflow["error"] = "cancelled"
+        try:
+            conversation.save_workflow(workflow, event_type="workflow_cancelled")
+        except Exception:  # noqa: BLE001
+            pass
+        if conversation.run.status is RunStatus.RUNNING:
+            try:
+                conversation.finish(
+                    RunStatus.CANCELLED, RunPhase.CANCELLED,
+                    {**metadata, "approved": False, "reason": "cancelled"},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        raise
     except BaseException:
         workflow["error"] = "exception"
         try:

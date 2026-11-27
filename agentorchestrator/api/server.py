@@ -7,7 +7,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -17,6 +17,8 @@ from ..adapters import build_adapters
 from ..adapters.base import AdapterError
 from ..config import AppConfig
 from ..orchestrator.engine import Conversation, run_collaboration
+from ..messaging.schema import RunPhase, RunStatus
+from ..permissions import PermissionBroker
 from ..storage.database import Store
 
 log = logging.getLogger(__name__)
@@ -52,10 +54,16 @@ class ContinueRequest(BaseModel):
     instruction: str | None = None
 
 
+class PermissionResolveRequest(BaseModel):
+    option_id: str | None = None
+    decision: Literal["allow", "deny"] | None = None
+
+
 @dataclass
 class RunHandle:
     run_id: str
     task: asyncio.Task[None] | None = None
+    conversation: Conversation | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
 
@@ -134,6 +142,18 @@ def _derive_workflow(store: Store, run: Any) -> dict[str, Any]:
     }
 
 
+def _attach_permission_handlers(adapters: dict[str, Any], run_id: str,
+                                broker: PermissionBroker) -> None:
+    for name, adapter in adapters.items():
+        if not hasattr(adapter, "permission_handler"):
+            continue
+
+        async def handler(message: dict[str, Any], _name: str = name) -> dict[str, Any]:
+            return await broker.request(run_id, _name, message)
+
+        adapter.permission_handler = handler
+
+
 def _run_payload(store: Store, handle: RunHandle | None, run_id: str) -> dict[str, Any]:
     run = store.get_run(run_id)
     if run is None:
@@ -166,6 +186,7 @@ def create_app(config: AppConfig, store: Store,
     app.state.config = config
     app.state.store = store
     app.state.handles = {}
+    app.state.permission_broker = PermissionBroker()
     app.state.auth_token = auth_token
 
     @app.middleware("http")
@@ -291,8 +312,11 @@ def create_app(config: AppConfig, store: Store,
             for adapter in adapters.values():
                 await adapter.aclose()
             raise
+        _attach_permission_handlers(
+            adapters, conversation.run_id, request.app.state.permission_broker,
+        )
 
-        handle = RunHandle(run_id=conversation.run_id)
+        handle = RunHandle(run_id=conversation.run_id, conversation=conversation)
         request.app.state.handles[handle.run_id] = handle
         store.update_run(conversation.run_id, metadata={
             **conversation.run.metadata,
@@ -381,6 +405,9 @@ def create_app(config: AppConfig, store: Store,
             for adapter in adapters.values():
                 await adapter.aclose()
             raise
+        _attach_permission_handlers(
+            adapters, conversation.run_id, request.app.state.permission_broker,
+        )
 
         new_workflow = dict(workflow)
         new_workflow.update({
@@ -414,7 +441,7 @@ def create_app(config: AppConfig, store: Store,
         store.update_run(conversation.run_id, metadata=metadata)
         conversation._refresh()
 
-        handle = RunHandle(run_id=conversation.run_id)
+        handle = RunHandle(run_id=conversation.run_id, conversation=conversation)
         request.app.state.handles[handle.run_id] = handle
         planner = workflow.get("planner") or parent.metadata.get("planner")
         worker = workflow.get("worker") or parent.metadata.get("worker")
@@ -444,9 +471,65 @@ def create_app(config: AppConfig, store: Store,
     async def get_run(run_id: str, request: Request) -> dict[str, Any]:
         handle = request.app.state.handles.get(run_id)
         try:
-            return _run_payload(request.app.state.store, handle, run_id)
+            payload = _run_payload(request.app.state.store, handle, run_id)
         except KeyError:
             raise HTTPException(404, f"未知 run_id: {run_id}") from None
+        payload["permissions"] = request.app.state.permission_broker.pending(run_id)
+        return payload
+
+    @app.post("/api/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
+        store: Store = request.app.state.store
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, f"未知 run_id: {run_id}")
+        handle: RunHandle | None = request.app.state.handles.get(run_id)
+        if handle is not None and _is_active(handle):
+            if handle.conversation is not None:
+                try:
+                    await asyncio.wait_for(handle.conversation.cancel_inflight(), timeout=5)
+                except Exception:  # noqa: BLE001 - 尽力中止远端
+                    pass
+            if handle.task is not None:
+                handle.task.cancel()
+                try:
+                    await handle.task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            request.app.state.permission_broker.cancel_run(run_id)
+            latest = store.get_run(run_id) or run
+            return {"run_id": run_id, "status": latest.status.value,
+                    "phase": latest.phase.value}
+        if run.status is RunStatus.RUNNING:
+            updated = store.transition_run(
+                run_id, status=RunStatus.CANCELLED, phase=RunPhase.CANCELLED,
+                event_type="run_cancelled", payload={"reason": "manual cancel"},
+            )
+            return {"run_id": run_id, "status": updated.status.value,
+                    "phase": updated.phase.value}
+        raise HTTPException(409, "该 run 当前没有执行中的任务")
+
+    @app.get("/api/permissions")
+    async def list_permissions(request: Request,
+                               run_id: str | None = None) -> list[dict[str, Any]]:
+        return request.app.state.permission_broker.pending(run_id)
+
+    @app.post("/api/permissions/{request_id}")
+    async def resolve_permission(request_id: str,
+                                 payload: PermissionResolveRequest,
+                                 request: Request) -> dict[str, Any]:
+        broker: PermissionBroker = request.app.state.permission_broker
+        try:
+            result = broker.resolve(
+                request_id, option_id=payload.option_id, decision=payload.decision,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"result": result, "permissions": broker.pending()}
 
     def _ensure_not_active(request: Request, run_id: str) -> None:
         if _is_active(request.app.state.handles.get(run_id)):

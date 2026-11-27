@@ -41,7 +41,7 @@ agents:
   #   cwd: /workspace
   #   timeout: 600
   #   poll_interval: 2
-  #   auto_approve: false
+  #   auto_approve: false   # true 仅自动允许 allow_once；ask 在 Web UI 中人工确认，超时拒绝
   #   # 工具授权策略：token 级匹配 operation（不是任意子串），复合操作取最严格
   #   # 可用 operation：read / write / test / network / execute / delete / install
   #   permissions:

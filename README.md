@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.8.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.9.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -74,6 +74,8 @@ start.bat --port 8766 --token my-password
 - **执行结果 / 最终交付物**置顶显示（可一键复制）；审查卡只显示判定，不重复正文；
 - 结构化审查结果（结论、findings、evidence、confidence）；
 - 待处理/隔离消息的「核对恢复」与「强制释放」；
+- ACP 工具授权请求会在界面弹出确认（允许一次/允许/拒绝，超时自动拒绝）；
+- 运行中的任务可以「取消运行」；
 - 历史运行列表，点击回看。
 
 界面默认只监听 `127.0.0.1`，不对外暴露。常用参数：
@@ -85,7 +87,7 @@ start.bat --port 8766 --token my-password
 （用户名任意，密码为 token）。详细说明见
 [docs/USER_GUIDE.md 第 6.1 节](docs/USER_GUIDE.md#61-图形界面推荐)。
 
-## 核心可靠性设计（v0.6）
+## 核心可靠性设计（v0.9）
 
 ### 1. 结构化审查（无关键字放行）
 
@@ -180,13 +182,18 @@ IDLE → SUBMITTED → RUNNING → IDLE
 
 ### 5.1 独立工作区证据与只读保护
 
-协调器在 Worker 前后独立执行 `git HEAD / status / diff` 快照，并把
-“协调器实测工作区”写入 Reviewer 提示词和 `workflow.verification`。这不依赖
-模型自报的证据。
+协调器在 Worker 前后独立执行 `git HEAD / status / diff` 快照，并额外计算文件树
+指纹（覆盖被 `.gitignore` 忽略的文件），把“协调器实测工作区”写入 Reviewer
+提示词和 `workflow.verification`。这不依赖模型自报的证据。
 
-当 OpenCode 执行角色为 `plan`（只读）时，如果前后快照发生变化（修改、删除、
-新增文件或新 commit），协调器会直接判定运行失败，原因
-`read_only_violation`，不会进入审查。
+当 OpenCode 执行角色为 `plan`（只读）时：
+
+- 前后快照发生变化 → 运行失败，原因 `read_only_violation`；
+- 工作区不是 git 仓库 / git 不可用 / 快照失败 → 运行失败，原因
+  `verification_unavailable`（fail-closed，不把“无法验证”当作通过）。
+
+文件树指纹默认排除 `.git`、`data`、`logs`、`.venv`、`node_modules` 等目录；
+`plan` 的原生只读权限仍是第一道边界，快照是第二道独立检查，不等于完整文件系统沙箱。
 
 ### 6. 工具权限：token/能力匹配
 
@@ -202,7 +209,10 @@ IDLE → SUBMITTED → RUNNING → IDLE
 | 无法识别 | — | ask |
 
 复合操作取最严格（`read+delete` → deny）；`deny` 优先于 `auto_approve`。
-配置：
+
+`ask` 在 Web UI 中会挂起并等待人工确认（默认 120 秒，超时拒绝）；CLI 没有交互
+通道时按拒绝处理。`auto_approve: true` 只自动选择 `allow_once`，不会自动选择
+`allow_always`。配置：
 
 ```yaml
 permissions:
@@ -349,7 +359,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 82 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 88 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）
@@ -384,8 +394,9 @@ OAuth state 校验、UI Basic Auth、ACP 并发 prompt、OpenCode v2 多候选�
   Planner 也可能把“读取 README 第一行”误解成“重写 README”。
 - Reviewer 现在会拿到协调器独立采集的 git HEAD/status/diff 快照，但尚未替用户
   执行测试命令或 CI；它仍是“结构化 AI 审查 + 工作区证据”，不是完整质量门禁。
-- “只读/不要修改”写在任务目标里只是提示；真正的只读边界是把 OpenCode
-  执行角色设为 `plan`。
+- 只读任务依赖 OpenCode `plan` + git/文件树快照；非 git 工作区会被判定
+  `verification_unavailable`，不会假装通过。忽略目录（如 `data`、`node_modules`）
+  不在文件树指纹范围内。
 - 继续任务会创建新 run，不会原地重开已失败的 terminal run；若要“同 run 续跑”
   需要进一步放宽状态机，当前不做。
 - 生成类任务可能已经写出文件，但仍在跑验证命令；等待超时会标记失败。

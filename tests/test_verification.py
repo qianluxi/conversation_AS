@@ -117,3 +117,49 @@ def test_read_only_workflow_fails_on_workspace_change(tmp_path: Path) -> None:
 def test_capture_workspace_non_git(tmp_path: Path) -> None:
     snapshot = capture_workspace(tmp_path)
     assert snapshot["available"] is False
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_capture_workspace_detects_ignored_file(tmp_path: Path) -> None:
+    repo = tmp_path / "repo-ignore"
+    repo.mkdir()
+    _make_repo(repo)
+    (repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "ignore"], cwd=repo, check=True, capture_output=True)
+
+    before = capture_workspace(repo)
+    (repo / "ignored.txt").write_text("secret change\n", encoding="utf-8")
+    after = capture_workspace(repo)
+    assert workspace_changed(before, after) is True
+
+
+def test_read_only_unavailable_verification_fails(tmp_path: Path) -> None:
+    workspace = tmp_path / "not-git"
+    workspace.mkdir()
+    store = Store(tmp_path / "verify2.db")
+    approved = '{"decision":"approved","summary":"ok","evidence":["e"],"confidence":0.9}'
+    adapters = {
+        "planner": _Scripted("planner", "任务方案"),
+        "worker": _Scripted("worker", "执行完成"),
+        "reviewer": _Scripted("reviewer", approved),
+    }
+    conversation = Conversation(store, adapters, goal="只读检查")
+
+    async def scenario() -> dict:
+        try:
+            return await run_collaboration(
+                conversation, planner="planner", worker="worker",
+                reviewer="reviewer", max_rounds=1, goal="只读检查",
+                workspace=str(workspace), read_only=True,
+            )
+        finally:
+            await conversation.close()
+
+    result = run(scenario())
+    assert result["approved"] is False
+    assert "verification_unavailable" in (result.get("error") or "")
+    stored = store.get_run(conversation.run_id)
+    assert stored.status is RunStatus.FAILED
+    assert stored.metadata["workflow"]["error"] == "verification_unavailable"
+    assert adapters["reviewer"].calls == []
+    store.close()

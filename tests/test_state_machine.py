@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agentorchestrator.adapters.base import (
     AdapterError,
     AdapterTimeout,
@@ -339,4 +341,43 @@ def test_workflow_resume_from_review_checkpoint(tmp_path: Path) -> None:
     child_run = store.get_run(child.run_id)
     assert child_run.status is RunStatus.COMPLETED
     assert child_run.metadata["workflow"]["stage"] == "done"
+    store.close()
+
+class BlockingWorker(ScriptedAdapter):
+    async def wait_response(self, ref, *, timeout=None):
+        import asyncio
+        await asyncio.Event().wait()
+
+
+def test_cancelled_run_is_marked_cancelled(tmp_path: Path) -> None:
+    import asyncio
+
+    store = Store(tmp_path / "cancel.db")
+    approved = '{"decision":"approved","summary":"ok","evidence":["e"],"confidence":0.9}'
+    adapters = {
+        "planner": ScriptedAdapter("planner", ["任务方案"]),
+        "worker": BlockingWorker("worker", ["不会返回"]),
+        "reviewer": ScriptedAdapter("reviewer", [approved]),
+    }
+    conversation = Conversation(store, adapters, goal="取消测试")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run_collaboration(
+            conversation, planner="planner", worker="worker", reviewer="reviewer",
+            max_rounds=1, goal="取消测试",
+        ))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await conversation.close()
+
+    run(scenario())
+    stored = store.get_run(conversation.run_id)
+    assert stored.status is RunStatus.CANCELLED
+    assert stored.phase is RunPhase.CANCELLED
+    assert stored.metadata["workflow"]["stage"] == "cancelled"
+    messages = store.list_messages(conversation.run_id)
+    worker_messages = [m for m in messages if m.to_agent == "worker"]
+    assert worker_messages and worker_messages[0].status is MessageStatus.CANCELLED
     store.close()

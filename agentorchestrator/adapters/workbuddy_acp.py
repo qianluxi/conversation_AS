@@ -11,6 +11,7 @@ import httpx
 
 from ..auth import WorkBuddyAuth
 from ..config import WorkBuddyAcpSettings
+from ..permissions import select_option
 from ..sse import iter_sse
 from .base import (
     AdapterAuthError,
@@ -391,12 +392,6 @@ class WorkBuddyAcpAdapter(AgentAdapter):
         ]
         return " ".join(str(part) for part in parts if part)
 
-    @staticmethod
-    def _select_option(options: list[dict[str, Any]]) -> dict[str, Any]:
-        allowed = [opt for opt in options if opt.get("kind") in ("allow_once", "allow_always")]
-        picked = (allowed or options or [{}])[0]
-        return {"outcome": {"outcome": "selected", "optionId": picked.get("optionId")}}
-
     async def _resolve_permission(self, message: dict[str, Any],
                                   params: dict[str, Any]) -> dict[str, Any]:
         options = params.get("options") or []
@@ -407,11 +402,12 @@ class WorkBuddyAcpAdapter(AgentAdapter):
         if category == "deny":
             return {"outcome": {"outcome": "cancelled"}}
         if category == "allow":
-            return self._select_option(options)
+            return select_option(options)
         if self.permission_handler is not None:
             return await self.permission_handler(message)
         if self.settings.auto_approve:
-            return self._select_option(options)
+            # 自动批准只允许一次性授权，不允许永久授权。
+            return select_option(options, kinds=("allow_once",))
         return {"outcome": {"outcome": "cancelled"}}
 
     def _fail_all(self, error: Exception) -> None:

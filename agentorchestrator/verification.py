@@ -1,10 +1,33 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+_EXCLUDED_DIRS = {
+    ".git", "data", "logs", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".venv", "venv", "node_modules", "dist", "build",
+}
+
+
+def _tree_fingerprint(root: Path) -> str:
+    parts: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in _EXCLUDED_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            parts.append(
+                f"{path.relative_to(root).as_posix()}\0{stat.st_size}\0{stat.st_mtime_ns}"
+            )
+    parts.sort()
+    return hashlib.sha256("\n".join(parts).encode("utf-8", "replace")).hexdigest()
 
 
 def _git(workspace: Path, args: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
@@ -37,6 +60,7 @@ def capture_workspace(workspace: str | Path | None) -> dict[str, Any]:
 
     fingerprint = "\n".join([
         head.stdout.strip(), status.stdout.strip(), numstat.stdout.strip(),
+        _tree_fingerprint(path),
     ])
     return {
         "available": True,
