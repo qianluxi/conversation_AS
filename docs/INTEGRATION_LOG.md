@@ -13,7 +13,7 @@
 | OpenCode | 1.19.0 |
 | WorkBuddy Desktop | 2.165.0 |
 | 模型 | `opencode-go/deepseek-v4.1-flash` |
-| 协调器 | conversation_AS 0.6.x ~ 0.12.0 |
+| 协调器 | conversation_AS 0.6.x ~ 0.12.1 |
 
 ## OpenCode
 
@@ -74,6 +74,8 @@
 - 0.12.0：接入 OpenCode 权限桥。轮询 `/permission?directory=...`，工作区和系统临时
   目录的 `external_directory` 自动回复 `once`；其他外部路径走 Web UI 确认；无 UI 或
   超时按拒绝处理。修复外部临时目录读写请求一直挂起的问题。
+- 0.12.1：修正 `start.bat` 顺序。即使 UI 已在 8765 运行，双击脚本也会先检查并启动
+  4097 的 OpenCode，再打开页面；同时修正连接错误里硬编码的 4096 提示。
 
 ### 官方 OAuth 本地助理 / 云端 ACP
 

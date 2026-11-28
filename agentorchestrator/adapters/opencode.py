@@ -90,8 +90,9 @@ class OpenCodeAdapter(AgentAdapter):
             )
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise AdapterError(
-                f"无法连接 OpenCode（{self._base}）。请确认已运行 "
-                f"`opencode serve --hostname 127.0.0.1 --port 4096`。原始错误：{exc}"
+                f"无法连接 OpenCode（{self._base}）。请确认 OpenCode 服务已启动并监听该地址"
+                f"（通常是 `opencode serve --hostname 127.0.0.1 --port 4097`）。"
+                f"原始错误：{exc}"
             ) from exc
         except httpx.HTTPError as exc:
             raise translate_transport_error(exc, what="OpenCode") from exc

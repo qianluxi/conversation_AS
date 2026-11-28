@@ -47,16 +47,6 @@ if errorlevel 1 (
   echo        The workbuddy agent will be unavailable until you start it.
 )
 
-rem ---- already running? ----------------------------------------------------
-if "%~1"=="" (
-  powershell -NoProfile -Command "if (Get-NetTCPConnection -State Listen -LocalPort 8765 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
-  if not errorlevel 1 (
-    echo [INFO] UI is already running: http://127.0.0.1:8765/
-    start "" "http://127.0.0.1:8765/"
-    exit /b 0
-  )
-)
-
 rem ---- OpenCode password ---------------------------------------------------
 if not defined OPENCODE_SERVER_PASSWORD (
   if exist "data\opencode-password.txt" (
@@ -80,6 +70,16 @@ if errorlevel 1 (
     start "OpenCode 4097" cmd /k "set OPENCODE_SERVER_PASSWORD=%OPENCODE_SERVER_PASSWORD%&& opencode serve --hostname 127.0.0.1 --port 4097"
     powershell -NoProfile -Command "$ok=$false; for($i=0;$i -lt 60;$i++){ Start-Sleep -Milliseconds 500; if(Get-NetTCPConnection -State Listen -LocalPort 4097 -ErrorAction SilentlyContinue){$ok=$true;break} }; if($ok){exit 0}else{exit 1}" >nul 2>nul
     if errorlevel 1 echo [WARN] OpenCode did not start within 30s. Check the OpenCode window.
+  )
+)
+
+rem ---- already running? ----------------------------------------------------
+if "%~1"=="" (
+  powershell -NoProfile -Command "if (Get-NetTCPConnection -State Listen -LocalPort 8765 -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>nul
+  if not errorlevel 1 (
+    echo [INFO] UI is already running: http://127.0.0.1:8765/
+    start "" "http://127.0.0.1:8765/"
+    exit /b 0
   )
 )
 
