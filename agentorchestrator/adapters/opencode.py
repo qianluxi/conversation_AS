@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 import httpx
@@ -26,6 +29,8 @@ from .base import (
 
 
 log = logging.getLogger(__name__)
+
+PermissionHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 @dataclass
@@ -66,6 +71,8 @@ class OpenCodeAdapter(AgentAdapter):
             )
         self._pending: dict[str, _Pending] = {}
         self._replies: dict[str, AgentReply] = {}
+        self._permission_seen: set[str] = set()
+        self.permission_handler: PermissionHandler | None = None
 
     # ---- http helpers -----------------------------------------------------
 
@@ -291,6 +298,190 @@ class OpenCodeAdapter(AgentAdapter):
             baseline_assistant_ids=baseline, sent_at=sent_at, api_style=style,
         )
 
+    # ---- permissions ------------------------------------------------------
+
+    def _permission_roots(self) -> list[str]:
+        roots = [self.settings.directory, tempfile.gettempdir(),
+                 *self.settings.external_directory_allow]
+        result: list[str] = []
+        for root in roots:
+            if not root:
+                continue
+            try:
+                path = Path(os.path.expanduser(str(root)))
+                if not path.is_absolute() and self.settings.directory:
+                    path = Path(self.settings.directory) / path
+                result.append(os.path.realpath(path))
+            except OSError:
+                continue
+        return result
+
+    def _pattern_allowed(self, pattern: str) -> bool:
+        raw = str(pattern or "").strip().strip('"')
+        if not raw:
+            return False
+        raw = raw.split("*", 1)[0].rstrip("/\\")
+        if not raw:
+            return False
+        try:
+            path = Path(os.path.expanduser(raw))
+            if not path.is_absolute() and self.settings.directory:
+                path = Path(self.settings.directory) / path
+            resolved = Path(os.path.realpath(path))
+        except OSError:
+            return False
+        for root in self._permission_roots():
+            try:
+                resolved.relative_to(Path(root))
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _permission_decision(self, name: str, patterns: list[str]) -> str:
+        name = name.strip().lower()
+        allowed = bool(patterns) and all(self._pattern_allowed(item) for item in patterns)
+        if name in {"read", "list", "glob", "grep"}:
+            return "allow" if (not patterns or allowed) else "ask"
+        if name in {"external_directory", "edit", "write"}:
+            return "allow" if allowed else "ask"
+        category = self.settings.permissions.category(
+            f"{name} {' '.join(str(item) for item in patterns)}"
+        )
+        # 执行类命令交给 UI 决定；未知/网络/写入默认 ask，删除/安装仍拒绝。
+        if category == "deny" and name in {"bash", "execute", "command", "shell"}:
+            return "ask"
+        return category
+
+    async def _permission_requests(self, session_id: str) -> list[dict[str, Any]]:
+        try:
+            response = await self._request(
+                "GET", "/permission", params=self._params(),
+                timeout=min(self._request_timeout, 10.0),
+            )
+            items = response.json()
+        except AdapterRemoteError as exc:
+            if exc.status_code not in (404, 405):
+                raise
+            response = await self._request(
+                "GET", "/api/permission/request",
+                params=self._params(),
+                timeout=min(self._request_timeout, 10.0),
+            )
+            items = response.json().get("data") or []
+        return [
+            item for item in items
+            if isinstance(item, dict) and item.get("sessionID") == session_id
+        ]
+
+    async def _reply_permission(self, request_id: str, session_id: str,
+                                reply: str) -> None:
+        style = self.settings.api_style
+        if style == "v2":
+            path = f"/api/session/{session_id}/permission/{request_id}/reply"
+            params = None
+            body = {"reply": reply}
+        else:
+            path = f"/permission/{request_id}/reply"
+            params = self._params()
+            body = {"reply": reply}
+        try:
+            await self._request(
+                "POST", path, params=params, json=body,
+                timeout=min(self._request_timeout, 10.0),
+            )
+        except AdapterRemoteError as exc:
+            if exc.status_code not in (404, 405):
+                raise
+            if style == "v2":
+                await self._request(
+                    "POST", f"/permission/{request_id}/reply",
+                    params=self._params(), json=body,
+                    timeout=min(self._request_timeout, 10.0),
+                )
+            else:
+                await self._request(
+                    "POST", f"/api/session/{session_id}/permission/{request_id}/reply",
+                    json=body, timeout=min(self._request_timeout, 10.0),
+                )
+
+    def _permission_message(self, session_id: str, name: str,
+                            patterns: list[str], metadata: Any) -> dict[str, Any]:
+        detail = "; ".join(str(item) for item in patterns)[:300]
+        return {
+            "params": {
+                "sessionId": session_id,
+                "title": f"OpenCode 请求 {name}: {detail}" if detail else f"OpenCode 请求 {name}",
+                "toolName": name,
+                "toolCall": {
+                    "name": name,
+                    "title": name,
+                    "kind": name,
+                    "input": {"patterns": patterns, "metadata": metadata},
+                },
+                "options": [
+                    {"optionId": "once", "name": "允许一次", "kind": "allow_once"},
+                    {"optionId": "always", "name": "始终允许此路径", "kind": "allow_always"},
+                    {"optionId": "reject", "name": "拒绝", "kind": "reject_once"},
+                ],
+            },
+        }
+
+    @staticmethod
+    def _permission_reply(result: dict[str, Any]) -> str:
+        if str(result.get("reply") or "") in {"once", "always", "reject"}:
+            return str(result["reply"])
+        outcome = result.get("outcome") or {}
+        if outcome.get("outcome") == "selected":
+            option = str(outcome.get("optionId") or "")
+            if option in {"once", "always", "reject"}:
+                return option
+            return "once"
+        return "reject"
+
+    async def _handle_permissions(self, session_id: str) -> None:
+        try:
+            requests = await self._permission_requests(session_id)
+        except AdapterError as exc:
+            log.debug("读取 OpenCode 权限请求失败：%s", exc)
+            return
+        for request in requests:
+            request_id = str(request.get("id") or "")
+            if not request_id or request_id in self._permission_seen:
+                continue
+            name = str(request.get("permission") or request.get("action") or "unknown")
+            patterns = [str(item) for item in (
+                request.get("patterns") or request.get("resources") or []
+            )]
+            decision = self._permission_decision(name, patterns)
+            if decision == "allow":
+                reply = "once"
+            elif decision == "deny":
+                reply = "reject"
+            elif self.permission_handler is not None:
+                self._permission_seen.add(request_id)
+                try:
+                    result = await self.permission_handler(
+                        self._permission_message(
+                            session_id, name, patterns, request.get("metadata"),
+                        )
+                    )
+                    reply = self._permission_reply(result)
+                except Exception as exc:  # noqa: BLE001 - 权限处理失败时拒绝，避免远端挂起
+                    log.warning("OpenCode 权限请求处理失败，按拒绝处理：%s", exc)
+                    reply = "reject"
+            else:
+                log.warning("OpenCode 请求 %s %s，但没有权限处理器，按拒绝处理",
+                            name, patterns)
+                reply = "reject"
+            self._permission_seen.add(request_id)
+            try:
+                await self._reply_permission(request_id, session_id, reply)
+            except AdapterError as exc:
+                self._permission_seen.discard(request_id)
+                log.warning("回复 OpenCode 权限请求失败：%s", exc)
+
+
     async def wait_response(self, ref: MessageRef, *, timeout: float | None = None) -> AgentReply:
         cached = self._replies.pop(ref.message_id, None)
         if cached is not None:
@@ -306,6 +497,7 @@ class OpenCodeAdapter(AgentAdapter):
         last_progress = None
         last_change = loop.time()
         while True:
+            await self._handle_permissions(pending.session_id)
             reply, partial, running_tools = await self._poll(pending, deadline)
             if reply is not None:
                 self._pending.pop(ref.message_id, None)

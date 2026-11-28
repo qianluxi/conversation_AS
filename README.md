@@ -5,7 +5,7 @@
 一个本地 Python 协调器：**不**让两个智能体直接互发消息，而是由协调器统一管理
 会话映射、消息协议、状态机、结构化审查、持久化与故障恢复。
 
-项目名 `agentorchestrator`，当前版本 `0.11.0`，要求 Python `>=3.11`
+项目名 `agentorchestrator`，当前版本 `0.12.0`，要求 Python `>=3.11`
 （与 `pyproject.toml` 一致；构建后端为 setuptools>=68）。
 
 > 首次使用请看 **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)**（安装、配置、
@@ -273,6 +273,26 @@ python -m agentorchestrator --config config.yaml send --agent opencode --text "�
 | 查询消息 | `GET /session/{id}/message` | `GET /api/session/{id}/message` |
 | 等待空闲 | 轮询 | `POST /api/session/{id}/wait` |
 | 中止 | `POST /session/{id}/abort` | `POST /api/session/{id}/interrupt` |
+| 待处理权限 | `GET /permission?directory=...` | `GET /api/permission/request` |
+| 回复权限 | `POST /permission/{id}/reply` | `POST /api/session/{id}/permission/{id}/reply` |
+
+### OpenCode 工作区外权限
+
+OpenCode 对工作区外路径会生成 `external_directory` 权限请求。协调器会在等待
+响应期间轮询当前 session 的权限列表：
+
+- 工作区、系统临时目录和 `opencode.external_directory_allow` 中的路径自动放行
+  （回复 `once`，不持久化）；
+- 其他外部路径在 Web UI 弹出确认：允许一次 / 始终允许该路径 / 拒绝；
+- 无 UI（CLI）或超时未确认时按拒绝处理；
+- `read/list/glob/grep` 在允许目录内自动放行；`bash/execute` 等按现有权限策略
+  进入 UI 确认或拒绝。
+
+```yaml
+opencode:
+  external_directory_allow:
+    - D:/scratch
+```
 
 ## 接入 WorkBuddy
 
@@ -374,7 +394,7 @@ agentorchestrator/
 └── cli.py
 docs/USER_GUIDE.md
 docs/WORKBUDDY_IPC.md
-tests/                   # 107 项：单元 + fake server + 故障注入 + API/UI
+tests/                   # 109 项：单元 + fake server + 故障注入 + API/UI
 ```
 
 ## 继续上次任务（工作流检查点）

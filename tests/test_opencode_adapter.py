@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -342,5 +343,129 @@ def test_cancel_request_uses_cancel_timeout() -> None:
             await adapter.cancel("ses_abort")
         assert seen == [0.05]
         await adapter.aclose()
+
+    run(scenario())
+
+def test_external_directory_permission_is_auto_allowed_under_workspace(tmp_path: Path) -> None:
+    state: dict[str, Any] = {"allowed": False, "reply": None, "asked": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/session":
+            return httpx.Response(200, json={"id": "ses_perm"})
+        if path == "/session/ses_perm/prompt_async":
+            body = json.loads(request.content)
+            state["asked"] = True
+            state["user_id"] = body["messageID"]
+            return httpx.Response(204)
+        if path == "/session/ses_perm/message":
+            if not state.get("user_id"):
+                return httpx.Response(200, json=[])
+            info = {"id": "msg_a", "sessionID": "ses_perm", "role": "assistant",
+                    "parentID": state.get("user_id"), "time": {"created": 2000}}
+            if state["allowed"]:
+                info["time"]["completed"] = 3000
+                part = {"type": "text", "text": "done"}
+            else:
+                part = {"type": "text", "text": "waiting"}
+            return httpx.Response(200, json=[
+                {"info": {"id": "msg_user", "sessionID": "ses_perm", "role": "user",
+                          "time": {"created": 1000}},
+                 "parts": [{"type": "text", "text": "hi"}]},
+                {"info": info, "parts": [part]},
+            ])
+        if path == "/permission":
+            return httpx.Response(200, json=[{
+                "id": "per1",
+                "sessionID": "ses_perm",
+                "permission": "external_directory",
+                "patterns": [str(tmp_path / "external" / "*")],
+                "metadata": {},
+                "always": [],
+                "tool": {"messageID": "msg_user", "callID": "call1"},
+            }])
+        if path == "/permission/per1/reply":
+            state["reply"] = json.loads(request.content.decode("utf-8"))
+            state["allowed"] = True
+            return httpx.Response(200, json=True)
+        return httpx.Response(404, json={"error": path})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter(
+                "oc", _settings(directory=str(tmp_path)), client=client,
+            )
+            session_id = await adapter.create_session("run-perm")
+            ref = await adapter.send_message(session_id, "hi")
+            reply = await adapter.wait_response(ref, timeout=2)
+            assert reply.text == "done"
+            assert state["reply"] == {"reply": "once"}
+
+    run(scenario())
+
+
+def test_external_directory_permission_asks_ui_outside_roots(tmp_path: Path) -> None:
+    state: dict[str, Any] = {"allowed": False, "reply": None, "permission_tool": None}
+    outside = "C:/Windows/System32/config/SAM"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/session":
+            return httpx.Response(200, json={"id": "ses_ask"})
+        if path == "/session/ses_ask/prompt_async":
+            body = json.loads(request.content)
+            state["user_id"] = body["messageID"]
+            return httpx.Response(204)
+        if path == "/session/ses_ask/message":
+            if not state.get("user_id"):
+                return httpx.Response(200, json=[])
+            info = {"id": "msg_a", "sessionID": "ses_ask", "role": "assistant",
+                    "parentID": state.get("user_id"), "time": {"created": 2000}}
+            if state["allowed"]:
+                info["time"]["completed"] = 3000
+                part = {"type": "text", "text": "done"}
+            else:
+                part = {"type": "text", "text": "waiting"}
+            return httpx.Response(200, json=[
+                {"info": {"id": "msg_user", "sessionID": "ses_ask", "role": "user",
+                          "time": {"created": 1000}},
+                 "parts": [{"type": "text", "text": "hi"}]},
+                {"info": info, "parts": [part]},
+            ])
+        if path == "/permission":
+            return httpx.Response(200, json=[{
+                "id": "per2",
+                "sessionID": "ses_ask",
+                "permission": "external_directory",
+                "patterns": [outside],
+                "metadata": {},
+                "always": [],
+                "tool": {"messageID": "msg_user", "callID": "call2"},
+            }])
+        if path == "/permission/per2/reply":
+            state["reply"] = json.loads(request.content.decode("utf-8"))
+            state["allowed"] = True
+            return httpx.Response(200, json=True)
+        return httpx.Response(404, json={"error": path})
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            adapter = OpenCodeAdapter(
+                "oc", _settings(directory=str(tmp_path)), client=client,
+            )
+
+            async def ask(message: dict[str, Any]) -> dict[str, Any]:
+                state["permission_tool"] = message["params"]["title"]
+                return {"outcome": {"outcome": "selected", "optionId": "always"}}
+
+            adapter.permission_handler = ask
+            session_id = await adapter.create_session("run-ask")
+            ref = await adapter.send_message(session_id, "hi")
+            reply = await adapter.wait_response(ref, timeout=2)
+            assert reply.text == "done"
+            assert state["reply"] == {"reply": "always"}
+            assert outside in state["permission_tool"]
 
     run(scenario())

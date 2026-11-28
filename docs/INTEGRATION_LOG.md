@@ -13,7 +13,7 @@
 | OpenCode | 1.19.0 |
 | WorkBuddy Desktop | 2.165.0 |
 | 模型 | `opencode-go/deepseek-v4.1-flash` |
-| 协调器 | conversation_AS 0.6.x ~ 0.11.0 |
+| 协调器 | conversation_AS 0.6.x ~ 0.12.0 |
 
 ## OpenCode
 
@@ -71,6 +71,9 @@
 - 0.11.0：拆分 Agent 响应超时与 HTTP 请求/取消超时；超时不再自动中止远端，
   UNKNOWN 消息可继续等待原任务、核对恢复或明确中止；无活动检测只在没有运行中工具时
   生效且默认关闭；WorkBuddy ACP 记录 chunk/工具活动并采用同样的超时语义。
+- 0.12.0：接入 OpenCode 权限桥。轮询 `/permission?directory=...`，工作区和系统临时
+  目录的 `external_directory` 自动回复 `once`；其他外部路径走 Web UI 确认；无 UI 或
+  超时按拒绝处理。修复外部临时目录读写请求一直挂起的问题。
 
 ### 官方 OAuth 本地助理 / 云端 ACP
 

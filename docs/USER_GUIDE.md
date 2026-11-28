@@ -83,6 +83,8 @@ agents:
     request_timeout: 30
     cancel_timeout: 8
     inactivity_timeout: 0
+    # 工作区和系统临时目录自动放行；其他外部目录在 UI 确认。
+    external_directory_allow: []
     poll_interval: 1
 storage:
   path: data/orchestrator.db
@@ -316,6 +318,8 @@ python -m agentorchestrator --config config.yaml ui
 - 实时查看运行状态、步骤耗时、消息全文、状态机事件和结构化审查结果；
 - **执行结果 / 最终交付物**显示在运行详情顶部，可一键复制；审查卡只显示判定；
 - ACP 工具授权会弹出确认（允许一次/允许/拒绝，超时拒绝）；
+- OpenCode 访问工作区外路径时会弹出授权：工作区、系统临时目录自动放行；
+  其他目录可选「允许一次 / 始终允许 / 拒绝」，超时拒绝；
 - 运行中可以「取消运行」，会尝试中止远端 Agent 并把 run 标记为 `cancelled`；
 - 在「待处理 / 隔离消息」中可「继续等待」原任务、「核对恢复」、「中止远端」或
   强制释放；默认不重发、不自动中止远端。

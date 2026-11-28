@@ -179,6 +179,9 @@ class OpencodeSettings(BaseModel):
     cancel_timeout: float = 8.0
     inactivity_timeout: float = 0.0
     poll_interval: float = 1.0
+    # 额外允许 OpenCode 读写的目录（工作区和系统临时目录始终允许）。
+    # 这些目录下的 external_directory 权限请求会自动放行，其余弹 UI 确认。
+    external_directory_allow: list[str] = Field(default_factory=list)
     verify_ssl: bool = True
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
 

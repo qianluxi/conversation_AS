@@ -74,6 +74,9 @@ agents:
     # 无活动超时：0 表示关闭。仅在没有任何运行中工具时生效；
     # 运行 npm install/build/test 等长命令不会因暂时无输出被中止。
     inactivity_timeout: 0
+    # 额外允许外部读写的目录；工作区和系统临时目录始终自动允许。
+    # 其他外部目录会通过 Web UI 弹出权限确认，超时默认拒绝。
+    external_directory_allow: []
     poll_interval: 1
 
   # 离线演示/测试用，不访问网络
